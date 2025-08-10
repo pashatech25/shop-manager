@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useRef, useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import {supabase} from '../lib/superbase.js';
 import {useTenant} from '../context/TenantContext.jsx';
 import InvoiceEditor from '../features/invoices/Editor.jsx';
@@ -13,8 +13,8 @@ export default function Invoices(){
   const [loading,setLoading]=useState(true);
   const [editId,setEditId]=useState(null);
   const [emailFor,setEmailFor]=useState(null);
-  const [viewRow,setViewRow]=useState(null);           // <-- view modal
-  const [viewCustomer,setViewCustomer]=useState(null);  // <-- customer in view modal
+  const [viewRow,setViewRow]=useState(null);
+  const [viewCustomer,setViewCustomer]=useState(null);
   const printRef=useRef(null);
 
   const load=async ()=>{
@@ -34,7 +34,9 @@ export default function Invoices(){
     setViewRow(row);
     setViewCustomer(null);
     if(row?.customer_id){
-      const {data}=await supabase.from('customers').select('id,company,name,email,phone,address,website').eq('id', row.customer_id).maybeSingle();
+      const {data}=await supabase.from('customers')
+        .select('id,company,name,email,phone,address,website')
+        .eq('id', row.customer_id).maybeSingle();
       setViewCustomer(data||null);
     }
   };
@@ -44,7 +46,9 @@ export default function Invoices(){
     if(!el){ alert('Printable element not found'); return; }
     el.innerHTML = renderInvoiceHtml({row, settings, customer:viewCustomer});
     const {url}=await captureElementToPdf({element: el, tenantId, kind:'invoices', code:row.code});
-    await supabase.from('invoices').update({pdf_path:`${tenantId}/invoices/${row.code}.pdf`, pdf_updated_at:new Date().toISOString()}).eq('id', row.id);
+    await supabase.from('invoices')
+      .update({pdf_path:`${tenantId}/invoices/${row.code}.pdf`, pdf_updated_at:new Date().toISOString()})
+      .eq('id', row.id);
     alert('PDF saved. A signed URL was generated for 1 hour:\n'+url);
     await load();
   };
@@ -105,7 +109,7 @@ export default function Invoices(){
       {/* Hidden printable area */}
       <div ref={printRef} style={{position:'fixed', left:-9999, top:-9999}}/>
 
-      {/* Edit drawer/modal */}
+      {/* Edit modal */}
       {editId? <InvoiceEditor invoiceId={editId} onClose={onSaved}/> : null}
 
       {/* View modal */}
@@ -147,12 +151,16 @@ function ViewInvoiceModal({row, customer, settings, onClose}){
   const adds=Array.isArray(items.addons)? items.addons: [];
   const labs=Array.isArray(items.labor)? items.labor: [];
 
-  const totals=row?.totals||{};
-  const preTax=Number(totals.totalChargePreTax ?? totals.totalCharge ?? 0);
-  const tax=Number(totals.tax ?? 0);
-  const total=Number(totals.grandTotal ?? totals.totalAfterTax ?? preTax+tax);
-  const deposit=Number(row?.deposit ?? 0);
-  const due=Number(totals.totalDue ?? total - deposit);
+  const t=row?.totals||{};
+  const preTax = Number(t.totalChargePreTax ?? t.totalCharge ?? 0);
+  // Use totals.taxPct if present, otherwise fall back to settings.tax_rate
+  const taxPct = Number( (t.taxPct ?? settings?.tax_rate ?? 0) );
+  const tax    = Number(t.tax ?? (preTax*(taxPct/100)));
+  const discount = Number(t.discountAmount ?? 0);
+  const total  = Number(t.grandTotal ?? t.totalAfterTax ?? (preTax - discount + tax));
+  const deposit = Number(t.deposit ?? row?.deposit ?? 0);
+  const due    = Number(t.totalDue ?? (total - deposit));
+  const showInk = !!t.showInkUsage;
 
   return (
     <div className="modal" onClick={onClose}>
@@ -181,11 +189,11 @@ function ViewInvoiceModal({row, customer, settings, onClose}){
           </div>
         </div>
 
-        {/* Items breakdown */}
+        {/* Items breakdown (read-only) */}
         <div className="card" style={{marginTop:12}}>
           <h4 style={{marginTop:0}}>Items</h4>
 
-          {/* Equipments (including UV ink usage) */}
+          {/* Equipment */}
           {eq.length>0? (
             <>
               <h5 style={{margin:'8px 0'}}>Equipment</h5>
@@ -193,7 +201,6 @@ function ViewInvoiceModal({row, customer, settings, onClose}){
                 <thead><tr>
                   <th>Equipment</th>
                   <th>Mode / Detail</th>
-                  <th style={{textAlign:'right'}}>Charge</th>
                 </tr></thead>
                 <tbody>
                   {eq.map((l,i)=>{
@@ -211,16 +218,14 @@ function ViewInvoiceModal({row, customer, settings, onClose}){
                         ink.gloss>0? `Gloss:${n4(ink.gloss)}ml`:null,
                         ink[using]>0? `${using==='white'?'White':'Soft White'}:${n4(ink[using])}ml`:null
                       ].filter(Boolean).join(' • ');
-                      detail = parts || 'Ink usage';
+                      detail = showInk ? (parts || 'Ink usage') : '—';
                     }else{
-                      detail = (l.mode==='hourly')? `${l.hours||0}h × $${n2(l.rate)}` : `Flat $${n2(l.flat_fee)}`;
+                      detail = (l.mode==='hourly')? `${l.hours||0}h × $${n2(l.rate)}` : (l.mode==='flat'? `Flat $${n2(l.flat_fee)}` : '—');
                     }
-                    const charge = Number(l.charge ?? 0); // when Editor computes/finalizes, you may store charge per line
                     return (
                       <tr key={i}>
                         <td>{l.name || l.type || 'Equipment'}</td>
                         <td>{detail}</td>
-                        <td style={{textAlign:'right'}}>${n2(charge)}</td>
                       </tr>
                     );
                   })}
@@ -237,23 +242,14 @@ function ViewInvoiceModal({row, customer, settings, onClose}){
                 <thead><tr>
                   <th>Description</th>
                   <th>Qty</th>
-                  <th style={{textAlign:'right'}}>Unit (Sell)</th>
-                  <th style={{textAlign:'right'}}>Line</th>
                 </tr></thead>
                 <tbody>
-                  {mats.map((m,i)=>{
-                    const qty=Number(m.qty||0);
-                    const unit=Number(m.selling_price ?? m.unit ?? 0);
-                    const line=qty*unit;
-                    return (
-                      <tr key={i}>
-                        <td>{m.name || m.description || 'Material'}</td>
-                        <td>{qty}</td>
-                        <td style={{textAlign:'right'}}>${n2(unit)}</td>
-                        <td style={{textAlign:'right'}}>${n2(line)}</td>
-                      </tr>
-                    );
-                  })}
+                  {mats.map((m,i)=>(
+                    <tr key={i}>
+                      <td>{m.name || m.description || 'Material'}</td>
+                      <td>{Number(m.qty||0)}</td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </>
@@ -266,23 +262,15 @@ function ViewInvoiceModal({row, customer, settings, onClose}){
               <table className="table">
                 <thead><tr>
                   <th>Description</th>
-                  <th>Hours</th>
-                  <th style={{textAlign:'right'}}>Rate</th>
-                  <th style={{textAlign:'right'}}>Line</th>
+                  <th>Hours × Rate</th>
                 </tr></thead>
                 <tbody>
-                  {labs.map((l,i)=>{
-                    const hours=Number(l.hours||0);
-                    const rate=Number(l.rate||0);
-                    return (
-                      <tr key={i}>
-                        <td>{l.desc||'Labor'}</td>
-                        <td>{n2(hours)}</td>
-                        <td style={{textAlign:'right'}}>${n2(rate)}</td>
-                        <td style={{textAlign:'right'}}>${n2(hours*rate)}</td>
-                      </tr>
-                    );
-                  })}
+                  {labs.map((l,i)=>(
+                    <tr key={i}>
+                      <td>{l.desc||'Labor'}</td>
+                      <td>{n2(l.hours)} × ${n2(l.rate)}</td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </>
@@ -295,44 +283,36 @@ function ViewInvoiceModal({row, customer, settings, onClose}){
               <table className="table">
                 <thead><tr>
                   <th>Name</th>
-                  <th>Qty</th>
-                  <th style={{textAlign:'right'}}>Price</th>
-                  <th style={{textAlign:'right'}}>Line</th>
+                  <th>Qty × Price</th>
                 </tr></thead>
                 <tbody>
-                  {adds.map((a,i)=>{
-                    const qty=Number(a.qty||0);
-                    const price=Number(a.price||0);
-                    return (
-                      <tr key={i}>
-                        <td>{a.name || a.description || 'Add-on'}</td>
-                        <td>{qty}</td>
-                        <td style={{textAlign:'right'}}>${n2(price)}</td>
-                        <td style={{textAlign:'right'}}>${n2(qty*price)}</td>
-                      </tr>
-                    );
-                  })}
+                  {adds.map((a,i)=>(
+                    <tr key={i}>
+                      <td>{a.name || a.description || 'Add-on'}</td>
+                      <td>{Number(a.qty||0)} × ${n2(a.price)}</td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </>
           ):null}
         </div>
 
-        {/* Totals */}
+        {/* Totals (use persisted totals + fallback tax rate) */}
         <div className="grid-2" style={{marginTop:12}}>
           <div className="card">
             <div style={{fontSize:12,color:'#666'}}>Memo</div>
             <div style={{whiteSpace:'pre-wrap'}}>{row?.memo||'—'}</div>
           </div>
-          <div className="card">
-            <Row label="Pre-tax" val={preTax}/>
-            <Row label="Tax" val={tax}/>
-            {Number(row?.discount_amount||0)!==0? <Row label="Discount" val={-Math.abs(Number(row.discount_amount))}/> : null}
-            <Row label="Deposit" val={-Math.abs(deposit)}/>
-            <div style={{height:1, background:'#eee', margin:'8px 0'}}/>
-            <Row label="Total" val={total} bold/>
-            <Row label="Amount Due" val={due} bold/>
-          </div>
+            <div className="card">
+              <Row label="Pre-tax" val={preTax}/>
+              {discount!==0? <Row label="Discount" val={-Math.abs(discount)}/> : null}
+              <Row label={`Tax (${n2(taxPct)}%)`} val={tax}/>
+              <div style={{height:1, background:'#eee', margin:'8px 0'}}/>
+              <Row label="Total" val={total} bold/>
+              <Row label="Deposit" val={-Math.abs(deposit)}/>
+              <Row label="Amount Due" val={due} bold/>
+            </div>
         </div>
       </div>
     </div>
@@ -347,7 +327,7 @@ function Row({label,val,bold}){
   );
 }
 
-/* ---------- helpers ---------- */
+/* helpers */
 function fmtDate(s){ try{ return new Date(s).toLocaleString(); }catch{ return s||''; } }
 function n2(x){ return Number(x||0).toFixed(2); }
 function n4(x){ return Number(x||0).toFixed(4); }
@@ -356,14 +336,16 @@ function coalesceTotal(row){
   return Number(t.grandTotal ?? t.totalAfterTax ?? t.total ?? t.totalCharge ?? 0);
 }
 
-/* ---------- printable html (simple) ---------- */
+/* printable html (simple) */
 function renderInvoiceHtml({row, settings, customer}){
-  const totals=row?.totals||{};
-  const preTax=Number(totals.totalChargePreTax ?? totals.totalCharge ?? 0).toFixed(2);
-  const tax=Number(totals.tax ?? 0).toFixed(2);
-  const total=Number(totals.grandTotal ?? totals.totalAfterTax ?? preTax).toFixed(2);
-  const dep=Number(row?.deposit ?? 0).toFixed(2);
-  const due=Number(totals.totalDue ?? (Number(total)-Number(dep))).toFixed(2);
+  const t=row?.totals||{};
+  const preTax=(Number(t.totalChargePreTax ?? t.totalCharge ?? 0));
+  const taxPct = Number( (t.taxPct ?? settings?.tax_rate ?? 0) );
+  const tax = Number(t.tax ?? (preTax*(taxPct/100)));
+  const discount=Number(t.discountAmount ?? 0);
+  const total=Number(t.grandTotal ?? t.totalAfterTax ?? (preTax - discount + tax));
+  const dep=Number(t.deposit ?? row?.deposit ?? 0);
+  const due=Number(t.totalDue ?? (total - dep));
 
   return `
   <div style="font-family:Arial, sans-serif; padding:24px; width:800px;">
@@ -392,12 +374,13 @@ function renderInvoiceHtml({row, settings, customer}){
         <div style="font-size:12px; color:#555">${escapeHtml(customer?.address || '')}</div>
       </div>
       <div style="padding:12px; border:1px solid #eee; border-radius:8px;">
-        <div style="display:flex; justify-content:space-between; margin:4px 0;"><span>Pre-tax</span><b>$${preTax}</b></div>
-        <div style="display:flex; justify-content:space-between; margin:4px 0;"><span>Tax</span><b>$${tax}</b></div>
-        <div style="display:flex; justify-content:space-between; margin:4px 0;"><span>Deposit</span><b>-$${dep}</b></div>
+        <div style="display:flex; justify-content:space-between; margin:4px 0;"><span>Pre-tax</span><b>$${preTax.toFixed(2)}</b></div>
+        <div style="display:flex; justify-content:space-between; margin:4px 0;"><span>Discount</span><b>-$${discount.toFixed(2)}</b></div>
+        <div style="display:flex; justify-content:space-between; margin:4px 0;"><span>Tax (${taxPct.toFixed(2)}%)</span><b>$${tax.toFixed(2)}</b></div>
+        <div style="display:flex; justify-content:space-between; margin:4px 0;"><span>Deposit</span><b>-$${dep.toFixed(2)}</b></div>
         <div style="height:1px; background:#eee; margin:8px 0"></div>
-        <div style="display:flex; justify-content:space-between; margin:8px 0; font-size:18px;"><span>Total</span><b>$${total}</b></div>
-        <div style="display:flex; justify-content:space-between; margin:8px 0; font-size:18px;"><span>Amount Due</span><b>$${due}</b></div>
+        <div style="display:flex; justify-content:space-between; margin:8px 0; font-size:18px;"><span>Total</span><b>$${total.toFixed(2)}</b></div>
+        <div style="display:flex; justify-content:space-between; margin:8px 0; font-size:18px;"><span>Amount Due</span><b>$${due.toFixed(2)}</b></div>
       </div>
     </div>
 
