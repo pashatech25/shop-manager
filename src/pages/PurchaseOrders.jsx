@@ -18,6 +18,7 @@ import Spinner from "../features/ui/Spinner.jsx";
 import Confirm from "../features/ui/Confirm.jsx";
 import { captureElementToPdf } from "../features/pdf/service.js";
 import { supabase } from "../lib/superbase.js";
+import { sendEmailDoc } from "../lib/email.js";
 
 export default function PurchaseOrders() {
   const { tenantId } = useTenant();
@@ -34,6 +35,9 @@ export default function PurchaseOrders() {
   const [emailFor, setEmailFor] = useState(null);
   const printRef = useRef(null);
 
+  // NEW: PDF preview modal state
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState("");
+
   // New PO form
   const [showNew, setShowNew] = useState(false);
 
@@ -43,7 +47,11 @@ export default function PurchaseOrders() {
   const load = async () => {
     if (!tenantId) return;
     setLoading(true);
-    const [low, vm, pl] = await Promise.all([fetchLowItemsGrouped(tenantId), fetchVendorsMap(tenantId), listPOs(tenantId)]);
+    const [low, vm, pl] = await Promise.all([
+      fetchLowItemsGrouped(tenantId),
+      fetchVendorsMap(tenantId),
+      listPOs(tenantId),
+    ]);
     setLowByVendor(low);
     setVendorsMap(vm);
     setPOs(pl);
@@ -68,31 +76,72 @@ export default function PurchaseOrders() {
     await load();
   };
 
+  // UPDATED: generate and preview PDF in a modal (no alert)
   const generatePdf = async (po) => {
-    const el = printRef.current;
-    if (!el) {
-      alert("Printable element not found");
-      return;
+    try {
+      const el = printRef.current;
+      if (!el) {
+        alert("Printable element not found");
+        return;
+      }
+      el.innerHTML = renderPOHtml({
+        po,
+        vendor: vendorsMap[po.vendor_id] || {},
+        items: poItems,
+      });
+
+      // 1) Render & upload to Storage
+      const { path, url } = await captureElementToPdf({
+        element: el,
+        tenantId,
+        kind: "purchase-orders",
+        code: po.code,
+      });
+
+      // 2) Persist path on the PO row (so you can email later)
+      await savePOPdfPath(po.id, path);
+
+      // 3) Open a preview modal
+      setPdfPreviewUrl(url);
+
+      // 4) Refresh list so the "PDF" column shows the path
+      await load();
+    } catch (err) {
+      console.error(err);
+      alert(err.message || "Failed to generate PDF");
     }
-    el.innerHTML = renderPOHtml({ po, vendor: vendorsMap[po.vendor_id] || {}, items: poItems });
-    const { url } = await captureElementToPdf({ element: el, tenantId, kind: "purchase-orders", code: po.code });
-    await savePOPdfPath(po.id, `${tenantId}/purchase-orders/${po.code}.pdf`);
-    alert("PO PDF saved.\n" + url);
-    await load();
   };
 
-  const sendEmail = async (po, to) => {
-    const vendor = vendorsMap[po.vendor_id] || {};
+  // email sender (unchanged – uses your edge function)
+  // inside PurchaseOrders.jsx
+const sendEmail = async (po, to) => {
+  try {
+    const vendor = vendorsMap?.[po.vendor_id] || {};
     const subject = `Purchase Order ${po.code}`;
     const html = renderPOEmail({ po, vendor });
-    const { error } = await supabase.functions.invoke("email-doc", { body: { to, subject, html } });
-    if (error) {
-      alert(error.message);
-      return;
+
+    let attachments;
+    if (po.pdf_path) {
+      const { data, error } = await supabase
+        .storage
+        .from("pdfs")
+        .createSignedUrl(po.pdf_path, 60 * 60);
+
+      if (!error && data?.signedUrl) {
+        attachments = [{ filename: `${po.code}.pdf`, url: data.signedUrl }];
+      }
     }
+
+    // calls the helper above -> Edge function
+    await sendEmailDoc({ to, subject, html, attachments });
     alert("Email sent.");
     setEmailFor(null);
-  };
+  } catch (err) {
+    console.error("Email error:", err);
+    alert(err.message || "Failed to send email");
+  }
+};
+
 
   return (
     <section className="section">
@@ -107,7 +156,16 @@ export default function PurchaseOrders() {
       </div>
 
       {/* New PO Form */}
-      {showNew ? <NewPOForm tenantId={tenantId} onClose={() => setShowNew(false)} onCreated={() => { setShowNew(false); load(); }} /> : null}
+      {showNew ? (
+        <NewPOForm
+          tenantId={tenantId}
+          onClose={() => setShowNew(false)}
+          onCreated={() => {
+            setShowNew(false);
+            load();
+          }}
+        />
+      ) : null}
 
       {/* Low Inventory by Vendor */}
       <div className="card" style={{ marginTop: 12 }}>
@@ -115,7 +173,9 @@ export default function PurchaseOrders() {
           <h3 className="tiny m-0">Low Inventory by Vendor</h3>
           <span className="tiny">Select items and quantities to create a PO</span>
         </div>
-        {Object.keys(lowByVendor).length === 0 ? <div className="tiny">No low items.</div> : null}
+        {Object.keys(lowByVendor).length === 0 ? (
+          <div className="tiny">No low items.</div>
+        ) : null}
         <div className="cards">
           {Object.entries(lowByVendor).map(([vendorId, items]) => {
             const v = vendorsMap[vendorId] || { name: "(Unknown)" };
@@ -124,7 +184,10 @@ export default function PurchaseOrders() {
                 <div className="row" style={{ alignItems: "center" }}>
                   <b>{v.name}</b>
                   <div className="btn-row">
-                    <button className="btn" onClick={() => setLowModal({ vendorId, items })}>
+                    <button
+                      className="btn"
+                      onClick={() => setLowModal({ vendorId, items })}
+                    >
                       Select & Create
                     </button>
                   </div>
@@ -134,7 +197,8 @@ export default function PurchaseOrders() {
                     <li key={m.id}>
                       {m.name}{" "}
                       <span className="tiny">
-                        on hand {m.on_hand ?? 0}, reserved {m.reserved ?? 0}, threshold {m.reorder_threshold ?? 0}
+                        on hand {m.on_hand ?? 0}, reserved {m.reserved ?? 0},
+                        threshold {m.reorder_threshold ?? 0}
                       </span>
                     </li>
                   ))}
@@ -165,7 +229,13 @@ export default function PurchaseOrders() {
                 <td>
                   <span className="badge">{po.status}</span>
                 </td>
-                <td>{po.pdf_path ? <span className="tiny mono">{po.pdf_path}</span> : <span className="tiny">—</span>}</td>
+                <td>
+                  {po.pdf_path ? (
+                    <span className="tiny mono">{po.pdf_path}</span>
+                  ) : (
+                    <span className="tiny">—</span>
+                  )}
+                </td>
                 <td style={{ textAlign: "right" }}>
                   <div className="btn-row" style={{ justifyContent: "flex-end" }}>
                     <button className="btn" onClick={() => openPO(po)}>
@@ -203,7 +273,14 @@ export default function PurchaseOrders() {
       </div>
 
       {/* View PO modal */}
-      {viewPO ? <POModal po={viewPO} onClose={() => setViewPO(null)} onReady={(items) => setPOItems(items)} onPdf={() => generatePdf(viewPO)} /> : null}
+      {viewPO ? (
+        <POModal
+          po={viewPO}
+          onClose={() => setViewPO(null)}
+          onReady={(items) => setPOItems(items)}
+          onPdf={() => generatePdf(viewPO)}
+        />
+      ) : null}
 
       {/* Low-by-vendor modal */}
       {lowModal ? (
@@ -231,7 +308,7 @@ export default function PurchaseOrders() {
         />
       ) : null}
 
-      {/* Hidden print region */}
+      {/* Hidden print region for html2canvas */}
       <div ref={printRef} style={{ position: "fixed", left: -9999, top: -9999 }} />
 
       {/* Email confirm */}
@@ -241,7 +318,13 @@ export default function PurchaseOrders() {
         message={
           <span>
             <label className="tiny">Recipient</label>
-            <input id="pomail" type="email" placeholder="name@vendor.com" style={{ width: "100%" }} defaultValue="" />
+            <input
+              id="pomail"
+              type="email"
+              placeholder="name@vendor.com"
+              style={{ width: "100%" }}
+              defaultValue=""
+            />
           </span>
         }
         onYes={() => {
@@ -251,6 +334,32 @@ export default function PurchaseOrders() {
         }}
         onNo={() => setEmailFor(null)}
       />
+
+      {/* NEW: PDF Preview Modal */}
+      {pdfPreviewUrl ? (
+        <div className="modal" onClick={() => setPdfPreviewUrl("")}>
+          <div className="modal-content wide" onClick={(e) => e.stopPropagation()}>
+            <div className="row">
+              <h3 className="m-0">Purchase Order PDF</h3>
+              <div className="btn-row">
+                <a className="btn" href={pdfPreviewUrl} target="_blank" rel="noreferrer">
+                  Open in new tab
+                </a>
+                <button className="btn btn-secondary" onClick={() => setPdfPreviewUrl("")}>
+                  Close
+                </button>
+              </div>
+            </div>
+            <div style={{ height: "75vh", border: "1px solid #eee", borderRadius: 8, overflow: "hidden" }}>
+              <iframe
+                title="PO PDF Preview"
+                src={pdfPreviewUrl}
+                style={{ width: "100%", height: "100%", border: "0" }}
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -265,12 +374,18 @@ function NewPOForm({ tenantId, onClose, onCreated }) {
   const [qtyById, setQtyById] = useState({}); // material_id -> qty
   const [jobId, setJobId] = useState("");
 
-  const loading = useMemo(() => !vendors.length && !materials.length, [vendors, materials]);
+  const loading = useMemo(
+    () => !vendors.length && !materials.length,
+    [vendors, materials]
+  );
 
   useEffect(() => {
     let cancel = false;
     (async () => {
-      const [vs, js] = await Promise.all([listVendors(tenantId), listActiveJobs(tenantId)]);
+      const [vs, js] = await Promise.all([
+        listVendors(tenantId),
+        listActiveJobs(tenantId),
+      ]);
       if (cancel) return;
       setVendors(vs);
       setJobs(js);
@@ -404,7 +519,9 @@ function NewPOForm({ tenantId, onClose, onCreated }) {
                     <input
                       type="checkbox"
                       checked={!!checked[m.id]}
-                      onChange={(e) => setChecked((c) => ({ ...c, [m.id]: e.target.checked }))}
+                      onChange={(e) =>
+                        setChecked((c) => ({ ...c, [m.id]: e.target.checked }))
+                      }
                     />
                   </td>
                   <td>
@@ -416,12 +533,16 @@ function NewPOForm({ tenantId, onClose, onCreated }) {
                       min="0"
                       step="1"
                       value={qtyById[m.id] ?? 0}
-                      onChange={(e) => setQtyById((q) => ({ ...q, [m.id]: e.target.value }))}
+                      onChange={(e) =>
+                        setQtyById((q) => ({ ...q, [m.id]: e.target.value }))
+                      }
                       style={{ width: 120 }}
                     />
                   </td>
                   <td style={{ textAlign: "right" }}>
-                    {m.purchase_price != null ? `$${Number(m.purchase_price).toFixed(2)}` : "—"}
+                    {m.purchase_price != null
+                      ? `$${Number(m.purchase_price).toFixed(2)}`
+                      : "—"}
                   </td>
                 </tr>
               ))}
@@ -451,7 +572,11 @@ function LowVendorModal({ tenantId, vendor, items, onClose, onCreate }) {
     (items || []).forEach((m) => {
       c[m.id] = true; // precheck low items
       // prefill suggested need:
-      const need = Math.max(1, Number(m.reorder_threshold || 0) - (Number(m.on_hand || 0) - Number(m.reserved || 0)));
+      const need = Math.max(
+        1,
+        Number(m.reorder_threshold || 0) -
+          (Number(m.on_hand || 0) - Number(m.reserved || 0))
+      );
       q[m.id] = need;
     });
     setChecked(c);
@@ -481,7 +606,10 @@ function LowVendorModal({ tenantId, vendor, items, onClose, onCreate }) {
               onClick={() => {
                 const picked = (items || [])
                   .filter((m) => checked[m.id])
-                  .map((m) => ({ ...m, qty: Number(qtyById[m.id] || 0) }))
+                  .map((m) => ({
+                    ...m,
+                    qty: Number(qtyById[m.id] || 0),
+                  }))
                   .filter((m) => m.qty > 0);
                 onCreate?.(picked);
               }}
@@ -506,14 +634,23 @@ function LowVendorModal({ tenantId, vendor, items, onClose, onCreate }) {
             </thead>
             <tbody>
               {(items || []).map((m) => {
-                const need = Math.max(1, Number(m.reorder_threshold || 0) - (Number(m.on_hand || 0) - Number(m.reserved || 0)));
+                const need = Math.max(
+                  1,
+                  Number(m.reorder_threshold || 0) -
+                    (Number(m.on_hand || 0) - Number(m.reserved || 0))
+                );
                 return (
                   <tr key={m.id}>
                     <td>
                       <input
                         type="checkbox"
                         checked={!!checked[m.id]}
-                        onChange={(e) => setChecked((c) => ({ ...c, [m.id]: e.target.checked }))}
+                        onChange={(e) =>
+                          setChecked((c) => ({
+                            ...c,
+                            [m.id]: e.target.checked,
+                          }))
+                        }
                       />
                     </td>
                     <td>{m.name}</td>
@@ -523,12 +660,16 @@ function LowVendorModal({ tenantId, vendor, items, onClose, onCreate }) {
                         min="0"
                         step="1"
                         value={qtyById[m.id] ?? need}
-                        onChange={(e) => setQtyById((q) => ({ ...q, [m.id]: e.target.value }))}
+                        onChange={(e) =>
+                          setQtyById((q) => ({ ...q, [m.id]: e.target.value }))
+                        }
                         style={{ width: 100 }}
                       />
                     </td>
                     <td style={{ textAlign: "right" }}>
-                      {m.purchase_price != null ? `$${Number(m.purchase_price).toFixed(2)}` : "—"}
+                      {m.purchase_price != null
+                        ? `$${Number(m.purchase_price).toFixed(2)}`
+                        : "—"}
                     </td>
                   </tr>
                 );
@@ -596,7 +737,11 @@ function POModal({ po, onClose, onReady, onPdf }) {
                 <tr key={it.id}>
                   <td>{it.description}</td>
                   <td>{it.qty}</td>
-                  <td>{it.unit_cost != null ? `$${Number(it.unit_cost).toFixed(2)}` : "—"}</td>
+                  <td>
+                    {it.unit_cost != null
+                      ? `$${Number(it.unit_cost).toFixed(2)}`
+                      : "—"}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -625,8 +770,12 @@ function renderPOHtml({ po, vendor, items }) {
           .map(
             (it) => `
           <tr>
-            <td style="border-bottom:1px solid #eee; padding:6px 4px;">${escape(it.description)}</td>
-            <td style="border-bottom:1px solid #eee; padding:6px 4px; text-align:right;">${Number(it.qty || 0)}</td>
+            <td style="border-bottom:1px solid #eee; padding:6px 4px;">${escape(
+              it.description
+            )}</td>
+            <td style="border-bottom:1px solid #eee; padding:6px 4px; text-align:right;">${Number(
+              it.qty || 0
+            )}</td>
             <td style="border-bottom:1px solid #eee; padding:6px 4px; text-align:right;">${
               it.unit_cost != null ? "$" + Number(it.unit_cost).toFixed(2) : "—"
             }</td>
@@ -649,5 +798,11 @@ function renderPOEmail({ po, vendor }) {
   `;
 }
 function escape(s) {
-  return String(s || "").replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
+  return String(s || "").replace(/[&<>"']/g, (m) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[m]));
 }

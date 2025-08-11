@@ -13,6 +13,10 @@ export default function Quotes(){
   const [maps,setMaps]=useState({equip:{}, mats:{}, addons:{}, cust:{}});
   const printRef=useRef(null);
 
+  // PDF modal
+  const [pdfUrl, setPdfUrl] = useState("");
+  const [pdfOpen, setPdfOpen] = useState(false);
+
   const loadMaps=async ()=>{
     if(!tenantId) return {equip:{}, mats:{}, addons:{}, cust:{}};
     const [eq,ma,ad,cu] = await Promise.all([
@@ -34,7 +38,7 @@ export default function Quotes(){
       supabase.from('quotes')
         .select('*')
         .eq('tenant_id', tenantId)
-        .neq('status','converted') // 1) hide converted quotes
+        .neq('status','converted')
         .order('created_at',{ascending:false}),
       loadMaps()
     ]);
@@ -63,12 +67,7 @@ export default function Quotes(){
       const ins = await supabase.from("jobs").insert(payload).select("*").single();
       if(ins.error) throw ins.error;
 
-      // delete the quote so it disappears entirely (you asked to remove it)
-      const del = await supabase.from("quotes")
-        .delete()
-        .eq("id", quote.id)
-        .eq("tenant_id", tenantId);
-      if(del.error) throw del.error;
+      await supabase.from("quotes").delete().eq("id", quote.id).eq("tenant_id", tenantId);
 
       alert(`Converted to Job ${ins.data.code}`);
       await load();
@@ -82,7 +81,8 @@ export default function Quotes(){
     if(!printRef.current){ alert('Printable element not found'); return; }
     printRef.current.innerHTML = renderQuoteHtml({row, maps});
     const {url}=await captureElementToPdf({element: printRef.current, tenantId, kind:'quotes', code:row.code});
-    alert('Quote PDF saved.\n'+url);
+    setPdfUrl(url);
+    setPdfOpen(true);
   };
 
   return (
@@ -133,6 +133,22 @@ export default function Quotes(){
         />
       ) : null}
 
+      {/* PDF preview modal */}
+      {pdfOpen ? (
+        <div className="modal" onClick={()=>setPdfOpen(false)}>
+          <div className="modal-content wide" onClick={(e)=>e.stopPropagation()}>
+            <div className="row">
+              <h3 style={{margin:0}}>PDF Preview</h3>
+              <div className="btn-row">
+                <a className="btn" href={pdfUrl} target="_blank" rel="noreferrer">Open in new tab</a>
+                <button className="btn btn-secondary" onClick={()=>setPdfOpen(false)}>Close</button>
+              </div>
+            </div>
+            <iframe title="quote-pdf" src={pdfUrl} style={{width:'100%', height:'70vh', border:'1px solid #eee'}}/>
+          </div>
+        </div>
+      ):null}
+
       <div ref={printRef} style={{position:'fixed', left:-9999, top:-9999}}/>
     </section>
   );
@@ -154,7 +170,6 @@ function QuoteCard({row, maps, onEdit, onView, onConvert, onDelete}){
           {created? created.toLocaleString() : ''} • {sum.customerLabel}
         </div>
 
-        {/* 2) Mini breakdown */}
         <div className="tiny" style={{marginBottom:6}}>
           {sum.eqLines.length? <b>Equipment:</b> : null} {sum.eqLabel}
         </div>
@@ -226,7 +241,6 @@ function QuoteViewModal({row, maps, onClose, onPdf}){
           {created? created.toLocaleString() : ''} • {sum.customerLabel}
         </div>
 
-        {/* Equipments */}
         <div className="section">
           <h4 style={{margin:'0 0 8px'}}>Equipment</h4>
           {sum.eqLines.length===0? <div className="tiny">None</div> : (
@@ -247,7 +261,6 @@ function QuoteViewModal({row, maps, onClose, onPdf}){
           ):null}
         </div>
 
-        {/* Materials */}
         <div className="section">
           <h4 style={{margin:'0 0 8px'}}>Materials</h4>
           {sum.matLines.length===0? <div className="tiny">None</div> : (
@@ -257,7 +270,6 @@ function QuoteViewModal({row, maps, onClose, onPdf}){
           )}
         </div>
 
-        {/* Labor */}
         <div className="section">
           <h4 style={{margin:'0 0 8px'}}>Labor</h4>
           {sum.laborLines.length===0? <div className="tiny">None</div> : (
@@ -267,7 +279,6 @@ function QuoteViewModal({row, maps, onClose, onPdf}){
           )}
         </div>
 
-        {/* Add-ons */}
         <div className="section">
           <h4 style={{margin:'0 0 8px'}}>Add-ons</h4>
           {sum.addonLines.length===0? <div className="tiny">None</div> : (
@@ -277,7 +288,6 @@ function QuoteViewModal({row, maps, onClose, onPdf}){
           )}
         </div>
 
-        {/* Totals */}
         <div className="card" style={{marginTop:12}}>
           <div className="grid-3">
             <div><strong>Cost:</strong><br/>${Number(row.totals?.totalCost??0).toFixed(2)}</div>
@@ -300,11 +310,9 @@ function summarizeQuote(row, maps){
   const lab=(items.labor||[]);
   const UV_TYPES=new Set(["UV Printer","Sublimation Printer"]);
 
-  // customer
   const cust = maps.cust[row.customer_id];
   const customerLabel = cust? (cust.company? `${cust.company} — ${cust.name}` : cust.name) : '(Customer)';
 
-  // equipment label lines
   const eqLines=[];
   const inkDots=[];
   let inkTotal=0;
@@ -323,7 +331,6 @@ function summarizeQuote(row, maps){
     const e = maps.equip[l.equipment_id];
     const name = e? (e.type? `${e.name} (${e.type})` : e.name) : '(Equipment)';
     if(UV_TYPES.has(l.type||e?.type)){
-      // gather inks
       const inks=l.inks||{};
       colorMap.forEach(({key,color,label})=>{
         const val=Number(inks[key]||0);
@@ -376,7 +383,6 @@ function summarizeQuote(row, maps){
 
 function fmt$(n){ const v=Number(n||0); return `$${v.toFixed(2)}`; }
 
-/* For PDF: reuse your PO approach and render a clean HTML snapshot */
 function renderQuoteHtml({row, maps}){
   const sum=summarizeQuote(row, maps);
   return `

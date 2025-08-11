@@ -20,6 +20,10 @@ export default function Jobs(){
 
   const printRef=useRef(null);
 
+  // PDF preview modal state
+  const [pdfUrl, setPdfUrl] = useState("");
+  const [pdfOpen, setPdfOpen] = useState(false);
+
   // -------- reference maps
   const loadMaps=async ()=>{
     if(!tenantId) return {equip:{}, mats:{}, addons:{}, cust:{}};
@@ -36,10 +40,6 @@ export default function Jobs(){
     return {equip, mats, addons, cust};
   };
 
-  // Build a lookup of existing invoices keyed by completed job id.
-  // Supports both:
-  //   - invoices.job_id (if RPC stored completed_job_id there)
-  //   - invoices.items.meta.completed_job_id (JSON path)
   const loadInvoicesMap = async ()=>{
     if(!tenantId) return {};
     const {data, error} = await supabase
@@ -52,11 +52,8 @@ export default function Jobs(){
     (data||[]).forEach(inv=>{
       const meta = inv.items?.meta || {};
       const cj = meta.completed_job_id || meta.source_completed_job_id || null;
-      if (cj) {
-        map[cj] = { id: inv.id, code: inv.code };
-      } else if (inv.job_id) {
-        map[inv.job_id] = { id: inv.id, code: inv.code };
-      }
+      if (cj) map[cj] = { id: inv.id, code: inv.code };
+      else if (inv.job_id) map[inv.job_id] = { id: inv.id, code: inv.code };
     });
     return map;
   };
@@ -91,7 +88,8 @@ export default function Jobs(){
     if(!printRef.current){ alert('Printable element not found'); return; }
     printRef.current.innerHTML = renderJobHtml({row, maps});
     const {url}=await captureElementToPdf({element: printRef.current, tenantId, kind, code:row.code});
-    alert('PDF saved.\n'+url);
+    setPdfUrl(url);
+    setPdfOpen(true);
   };
 
   const onDeleteActive = async (row)=>{
@@ -131,7 +129,6 @@ export default function Jobs(){
       return;
     }
 
-    // Optimistic flip
     if(data?.code){
       setInvoiceByCompletedJob(prev => ({ ...prev, [cjId]: { id: data.id || 'new', code: data.code } }));
     } else {
@@ -193,7 +190,7 @@ export default function Jobs(){
               <th style={{textAlign:'right'}}>Actions</th>
             </tr>
           </thead>
-          <tbody>
+        <tbody>
             {completed.map((r)=>(
               <tr key={r.id}>
                 <td className="mono">{r.code}</td>
@@ -206,8 +203,6 @@ export default function Jobs(){
                     <button className="btn" onClick={()=>onPdf(r,'completed-jobs')}>
                       <i className="fa-regular fa-file-pdf"/> PDF
                     </button>
-
-                    {/* One-time invoice generation UI */}
                     {invoiceByCompletedJob[r.id] ? (
                       <button className="btn btn-success" disabled title={`Invoice ${invoiceByCompletedJob[r.id].code} already generated`}>
                         Invoice Generated
@@ -240,6 +235,22 @@ export default function Jobs(){
           onGenerateInvoice={()=>onGenerateInvoice(viewing)}
         />
       ) : null}
+
+      {/* PDF preview modal */}
+      {pdfOpen ? (
+        <div className="modal" onClick={()=>setPdfOpen(false)}>
+          <div className="modal-content wide" onClick={(e)=>e.stopPropagation()}>
+            <div className="row">
+              <h3 style={{margin:0}}>PDF Preview</h3>
+              <div className="btn-row">
+                <a className="btn" href={pdfUrl} target="_blank" rel="noreferrer">Open in new tab</a>
+                <button className="btn btn-secondary" onClick={()=>setPdfOpen(false)}>Close</button>
+              </div>
+            </div>
+            <iframe title="job-pdf" src={pdfUrl} style={{width:'100%', height:'70vh', border:'1px solid #eee'}}/>
+          </div>
+        </div>
+      ):null}
 
       <div ref={printRef} style={{position:'fixed', left:-9999, top:-9999}}/>
     </section>
@@ -385,11 +396,9 @@ function summarize(row, maps){
   const lab=(items.labor||[]);
   const UV_TYPES=new Set(["UV Printer","Sublimation Printer"]);
 
-  // customer
   const cust = maps.cust[row.customer_id];
   const customerLabel = cust? (cust.company? `${cust.company} — ${cust.name}` : cust.name) : '(Customer)';
 
-  // equipment label lines
   const eqLines=[];
   const inkDots=[];
   let inkTotal=0;
