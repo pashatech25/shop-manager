@@ -1,408 +1,291 @@
-import {useEffect, useRef, useState} from 'react';
-import {supabase} from '../lib/superbase.js';
-import {useTenant} from '../context/TenantContext.jsx';
-import InvoiceEditor from '../features/invoices/Editor.jsx';
-import Spinner from '../features/ui/Spinner.jsx';
-import Confirm from '../features/ui/Confirm.jsx';
-import {captureElementToPdf} from '../features/pdf/service.js';
+import {useEffect, useRef, useState} from "react";
+import {useTenant} from "../context/TenantContext.jsx";
+import {supabase} from "../lib/superbase.js";
+import Editor from "../features/invoices/Editor.jsx";
+import {captureElementToPdf} from "../features/pdf/service.js";
+
+// --- shared helpers (same math as Editor) ---
+async function loadPriceMaps(tenantId){
+  const [mats, equips] = await Promise.all([
+    supabase.from("materials").select("id,selling_price").eq("tenant_id", tenantId),
+    supabase.from("equipments").select("id,rate_c,rate_m,rate_y,rate_k,rate_white,rate_soft_white,rate_gloss").eq("tenant_id", tenantId)
+  ]);
+  const matMap = new Map((mats.data||[]).map(r=>[r.id, Number(r.selling_price||0)]));
+  const eqMap  = new Map((equips.data||[]).map(r=>[r.id, {
+    c:+(r.rate_c||0), m:+(r.rate_m||0), y:+(r.rate_y||0), k:+(r.rate_k||0),
+    white:+(r.rate_white||0), soft_white:+(r.rate_soft_white||0), gloss:+(r.rate_gloss||0)
+  }]));
+  return {matMap, eqMap};
+}
+function recomputeChargesFromItems(items, {matMap, eqMap}, marginPct=100){
+  const mats=Array.isArray(items?.materials)?items.materials:[];
+  const eqs =Array.isArray(items?.equipments)?items.equipments:[];
+  const adds=Array.isArray(items?.addons)?items.addons:[];
+  const labs=Array.isArray(items?.labor)?items.labor:[];
+  let materialsCharge=0; for(const l of mats){ materialsCharge += Number(l.qty||0) * (matMap.get(l.material_id)||0); }
+  let equipmentCharge=0, uvInkCost=0;
+  for(const l of eqs){
+    const type=(l.type||"").toLowerCase();
+    const isUV= type.includes("uv") || type.includes("sublimation");
+    if(!isUV){
+      if(l.mode==="hourly") equipmentCharge += Number(l.hours||0)*Number(l.rate||0);
+      else equipmentCharge += Number(l.flat_fee||0);
+      continue;
+    }
+    const r=eqMap.get(l.equipment_id)||{};
+    const ink=l.inks||{}; const sw=!!l.use_soft_white;
+    uvInkCost += Number(ink.c||0)*(r.c||0)
+               + Number(ink.m||0)*(r.m||0)
+               + Number(ink.y||0)*(r.y||0)
+               + Number(ink.k||0)*(r.k||0)
+               + Number(ink.gloss||0)*(r.gloss||0)
+               + (sw? Number(ink.soft_white||0)*(r.soft_white||0) : Number(ink.white||0)*(r.white||0));
+  }
+  const inkCharge= uvInkCost * (1 + Number(marginPct||0)/100);
+  let laborCharge=0; for(const l of labs){ laborCharge += Number(l.hours||0)*Number(l.rate||0); }
+  let addonsCharge=0; for(const a of adds){ addonsCharge += Number(a.qty||0)*Number(a.price||0); }
+  const preTax = equipmentCharge + materialsCharge + laborCharge + addonsCharge + (isFinite(inkCharge)? inkCharge:0);
+  return {equipmentCharge, materialsCharge, laborCharge, addonsCharge, inkCharge, preTax};
+}
+function calcTotalsView(r, taxRatePct){
+  const t=r?.totals||{};
+  const pre=Number(t.totalChargePreTax||0);
+  const disc=Number(r?.discount||0);
+  const discAmt=(r?.discount_type==="percent")? (pre*(disc/100)) : disc;
+  const taxableBase = (t?.discountApplyTax? Math.max(0, pre-discAmt) : pre);
+  const tax = taxableBase * (Number(taxRatePct||0)/100);
+  const dep = Number(r?.deposit||0);
+  const grand = Math.max(0, (pre - discAmt) + tax - dep);
+  return {pre, discAmt, tax, dep, grand};
+}
 
 export default function Invoices(){
   const {tenantId}=useTenant();
   const [rows,setRows]=useState([]);
-  const [settings,setSettings]=useState(null);
-  const [loading,setLoading]=useState(true);
-  const [editId,setEditId]=useState(null);
-  const [emailFor,setEmailFor]=useState(null);
+  const [editing,setEditing]=useState(null);
   const [viewRow,setViewRow]=useState(null);
   const [viewCustomer,setViewCustomer]=useState(null);
+  const [settings,setSettings]=useState(null);
   const printRef=useRef(null);
 
   const load=async ()=>{
     if(!tenantId) return;
-    setLoading(true);
-    const [{data:inv},{data:st}] = await Promise.all([
-      supabase.from('invoices').select('*').eq('tenant_id', tenantId).order('created_at',{ascending:false}),
-      supabase.from('settings').select('*').eq('tenant_id', tenantId).maybeSingle()
-    ]);
-    setRows(inv||[]); setSettings(st||null); setLoading(false);
+    const {data}=await supabase.from("invoices").select("*").eq("tenant_id", tenantId).order("created_at",{ascending:false});
+    setRows(data||[]);
+    const {data:st}=await supabase.from("settings").select("tax_rate,currency").eq("tenant_id", tenantId).maybeSingle();
+    setSettings(st||{tax_rate:0,currency:"USD"});
   };
   useEffect(()=>{ load(); },[tenantId]);
 
-  const onSaved=()=>{ setEditId(null); load(); };
-
   const openView=async (row)=>{
-    setViewRow(row);
-    setViewCustomer(null);
-    if(row?.customer_id){
-      const {data}=await supabase.from('customers')
-        .select('id,company,name,email,phone,address,website')
-        .eq('id', row.customer_id).maybeSingle();
-      setViewCustomer(data||null);
-    }
+    setViewRow(null); setViewCustomer(null);
+    const [custRes, maps] = await Promise.all([
+      row?.customer_id
+        ? supabase.from("customers").select("id,company,name,email,phone,address,website").eq("id", row.customer_id).maybeSingle()
+        : Promise.resolve({data:null}),
+      loadPriceMaps(tenantId)
+    ]);
+    const marginPct=row?.items?.meta?.marginPct ?? 100;
+    const f=recomputeChargesFromItems(row?.items, maps, marginPct);
+    setViewCustomer(custRes.data||null);
+    setViewRow({
+      ...row,
+      totals:{
+        ...(row?.totals||{}),
+        equipmentCharge: row?.totals?.equipmentCharge ?? f.equipmentCharge,
+        materialsCharge: row?.totals?.materialsCharge ?? f.materialsCharge,
+        laborCharge:     row?.totals?.laborCharge     ?? f.laborCharge,
+        addonsCharge:    row?.totals?.addonsCharge    ?? f.addonsCharge,
+        inkCharge:       row?.totals?.inkCharge       ?? f.inkCharge,
+        totalChargePreTax: row?.totals?.totalChargePreTax ?? f.preTax
+      }
+    });
   };
 
-  const generatePdf=async (row)=>{
-    const el=printRef.current;
-    if(!el){ alert('Printable element not found'); return; }
-    el.innerHTML = renderInvoiceHtml({row, settings, customer:viewCustomer});
-    const {url}=await captureElementToPdf({element: el, tenantId, kind:'invoices', code:row.code});
-    await supabase.from('invoices')
-      .update({pdf_path:`${tenantId}/invoices/${row.code}.pdf`, pdf_updated_at:new Date().toISOString()})
-      .eq('id', row.id);
-    alert('PDF saved. A signed URL was generated for 1 hour:\n'+url);
-    await load();
+  const generatePdf=async (r)=>{
+    if(!printRef.current) return;
+    const t=r?.totals||{};
+    const showInk = !!(t.showInkUsage);
+    const {pre, discAmt, tax, dep, grand}=calcTotalsView(r, settings?.tax_rate);
+    const html = `
+      <div style="font-family:Arial;padding:24px;width:800px">
+        <h2 style="margin:0 0 6px 0">Invoice <span style="font-weight:normal">#${r.code}</span></h2>
+        <div style="margin:8px 0 16px 0; font-size:12px; color:#555">Date: ${new Date(r.created_at).toLocaleString()}</div>
+        <table style="width:100%;border-collapse:collapse;font-size:14px">
+          <tbody>
+            <tr><td>Equipment</td><td style="text-align:right">$${Number(t.equipmentCharge||0).toFixed(2)}</td></tr>
+            <tr><td>Materials</td><td style="text-align:right">$${Number(t.materialsCharge||0).toFixed(2)}</td></tr>
+            <tr><td>Labor</td><td style="text-align:right">$${Number(t.laborCharge||0).toFixed(2)}</td></tr>
+            <tr><td>Add-ons</td><td style="text-align:right">$${Number(t.addonsCharge||0).toFixed(2)}</td></tr>
+            ${showInk? `<tr><td>UV/Sublimation Ink (margin applied)</td><td style="text-align:right">$${Number(t.inkCharge||0).toFixed(2)}</td></tr>`:""}
+            <tr><td><b>Subtotal</b></td><td style="text-align:right"><b>$${pre.toFixed(2)}</b></td></tr>
+            <tr><td>Discount</td><td style="text-align:right">−$${discAmt.toFixed(2)}</td></tr>
+            <tr><td>Tax (${Number(settings?.tax_rate||0).toFixed(2)}%)</td><td style="text-align:right">$${tax.toFixed(2)}</td></tr>
+            <tr><td>Deposit</td><td style="text-align:right">−$${dep.toFixed(2)}</td></tr>
+            <tr><td><b>Total</b></td><td style="text-align:right"><b>$${grand.toFixed(2)}</b></td></tr>
+          </tbody>
+        </table>
+      </div>`;
+    printRef.current.innerHTML = html;
+    const {url}=await captureElementToPdf({element: printRef.current, tenantId, kind:"invoices", code:r.code});
+    alert("PDF saved: "+url);
   };
 
-  const sendEmail=async (row, to)=>{
-    const subject=`Invoice ${row.code}`;
-    const html=renderEmailHtml({row, settings});
-    const {error}=await supabase.functions.invoke('email-doc', {body:{to, subject, html}});
+  const emailInvoice = async (r)=>{
+    const to = prompt("Send invoice to (email):");
+    if(!to) return;
+    const subject = `Invoice ${r.code}`;
+    const t=r?.totals||{};
+    const showInk = !!t.showInkUsage;
+    const {pre, discAmt, tax, dep, grand}=calcTotalsView(r, settings?.tax_rate);
+    const html = `
+      <div style="font-family:Arial; color:#111">
+        <p>Please find invoice <b>${r.code}</b> below.</p>
+        <table style="width:100%;border-collapse:collapse;font-size:14px">
+          <tbody>
+            <tr><td>Equipment</td><td style="text-align:right">$${Number(t.equipmentCharge||0).toFixed(2)}</td></tr>
+            <tr><td>Materials</td><td style="text-align:right">$${Number(t.materialsCharge||0).toFixed(2)}</td></tr>
+            <tr><td>Labor</td><td style="text-align:right">$${Number(t.laborCharge||0).toFixed(2)}</td></tr>
+            <tr><td>Add-ons</td><td style="text-align:right">$${Number(t.addonsCharge||0).toFixed(2)}</td></tr>
+            ${showInk? `<tr><td>UV/Sublimation Ink</td><td style="text-align:right">$${Number(t.inkCharge||0).toFixed(2)}</td></tr>`:""}
+            <tr><td>Subtotal</td><td style="text-align:right">$${pre.toFixed(2)}</td></tr>
+            <tr><td>Discount</td><td style="text-align:right">−$${discAmt.toFixed(2)}</td></tr>
+            <tr><td>Tax (${Number(settings?.tax_rate||0).toFixed(2)}%)</td><td style="text-align:right">$${tax.toFixed(2)}</td></tr>
+            <tr><td>Deposit</td><td style="text-align:right">−$${dep.toFixed(2)}</td></tr>
+            <tr><td><b>Total</b></td><td style="text-align:right"><b>$${grand.toFixed(2)}</b></td></tr>
+          </tbody>
+        </table>
+        <p>Thank you.</p>
+      </div>`;
+    const {error}=await supabase.functions.invoke('email-doc',{body:{to, subject, html}});
     if(error){ alert(error.message); return; }
     alert('Email sent.');
-    setEmailFor(null);
+  };
+
+  // simple row calc (no hooks)
+  const rowCalc = (r)=>{
+    const t=r?.totals||{};
+    const pre = Number(t.totalChargePreTax ?? (
+      Number(t.equipmentCharge||0)
+      + Number(t.materialsCharge||0)
+      + Number(t.laborCharge||0)
+      + Number(t.addonsCharge||0)
+      + Number(t.inkCharge||0)
+    ));
+    const disc=Number(r?.discount||0);
+    const discAmt=(r?.discount_type==="percent")? (pre*(disc/100)) : disc;
+    const taxableBase = (t?.discountApplyTax? Math.max(0, pre-discAmt) : pre);
+    const tax = taxableBase * (Number(settings?.tax_rate||0)/100);
+    const dep = Number(r?.deposit||0);
+    const grand = Math.max(0, (pre - discAmt) + tax - dep);
+    return {pre, grand};
   };
 
   return (
     <section className="section">
-      <div className="section-header">
-        <h2>Invoices</h2>
-        {loading? <Spinner label="Loading"/> : <span className="tiny">{rows.length} invoices</span>}
-      </div>
+      <div className="section-header"><h2>Invoices</h2></div>
 
-      <div className="table-wrap">
-        <table id="invoices-table" className="table">
+      {editing? (
+        <div className="card">
+          <Editor
+            row={editing}
+            onClose={()=>setEditing(null)}
+            onSaved={(up)=>{
+              setEditing(null);
+              setRows((xs)=>xs.map((r)=>r.id===up.id? up:r));
+            }}
+          />
+        </div>
+      ):null}
+
+      {viewRow? (
+        <div className="modal" onClick={()=>setViewRow(null)}>
+          <div className="modal-content" onClick={(e)=>e.stopPropagation()}>
+            <div className="row">
+              <h3>Invoice <span className="tiny mono">#{viewRow.code}</span></h3>
+              <div className="btn-row">
+                <button className="btn" onClick={()=>generatePdf(viewRow)}><i className="fa-regular fa-file-pdf"/> PDF</button>
+                <button className="btn" onClick={()=>emailInvoice(viewRow)}><i className="fa-regular fa-envelope"/> Email</button>
+                <button className="btn btn-secondary" onClick={()=>setViewRow(null)}>Close</button>
+              </div>
+            </div>
+            <div className="tiny">Created: {new Date(viewRow.created_at).toLocaleString()}</div>
+
+            {viewCustomer? (
+              <div className="card" style={{marginTop:10}}>
+                <b>Customer</b>
+                <div className="tiny">{viewCustomer.company||viewCustomer.name}</div>
+                <div className="tiny">{viewCustomer.email}</div>
+                <div className="tiny">{viewCustomer.phone}</div>
+                <div className="tiny">{viewCustomer.address}</div>
+              </div>
+            ):null}
+
+            {/* Charges box – no hooks here */}
+            {(() =>{
+              const t=viewRow?.totals||{};
+              const showInk = !!t.showInkUsage;
+              const c = calcTotalsView(viewRow, settings?.tax_rate);
+              return (
+                <div className="card" style={{marginTop:10}}>
+                  <b>Charges</b>
+                  <div className="tiny">Equipment: ${Number(t.equipmentCharge||0).toFixed(2)}</div>
+                  <div className="tiny">Materials: ${Number(t.materialsCharge||0).toFixed(2)}</div>
+                  <div className="tiny">Labor: ${Number(t.laborCharge||0).toFixed(2)}</div>
+                  <div className="tiny">Add-ons: ${Number(t.addonsCharge||0).toFixed(2)}</div>
+                  {showInk? <div className="tiny">UV/Sublimation Ink: ${Number(t.inkCharge||0).toFixed(2)}</div> : null}
+                  <div className="tiny"><b>Subtotal</b>: ${c.pre.toFixed(2)}</div>
+                  <div className="tiny">Discount: −${c.discAmt.toFixed(2)}</div>
+                  <div className="tiny">Tax ({Number(settings?.tax_rate||0).toFixed(2)}%): ${c.tax.toFixed(2)}</div>
+                  <div className="tiny">Deposit: −${c.dep.toFixed(2)}</div>
+                  <div className="tiny"><b>Total</b>: ${c.grand.toFixed(2)}</div>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      ):null}
+
+      {/* Back to your table list */}
+      <div className="table-wrap" style={{marginTop:16}}>
+        <table className="table">
           <thead>
             <tr>
               <th>Invoice #</th>
-              <th>Created</th>
-              <th>Total</th>
-              <th>PDF</th>
-              <th style={{textAlign:'right'}}>Actions</th>
+              <th>Title</th>
+              <th>Date</th>
+              <th style={{textAlign:"right"}}>Subtotal</th>
+              <th style={{textAlign:"right"}}>Total</th>
+              <th style={{textAlign:"right"}}>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {(rows||[]).map((r)=>(
-              <tr key={r.id}>
-                <td className="mono">{r.code}</td>
-                <td>{fmtDate(r.created_at)}</td>
-                <td>${coalesceTotal(r).toFixed(2)}</td>
-                <td>{r.pdf_path? <span className="tiny mono">{r.pdf_path}</span> : <span className="tiny">—</span>}</td>
-                <td style={{textAlign:'right'}}>
-                  <div className="btn-row" style={{justifyContent:'flex-end'}}>
-                    <button className="btn" onClick={()=>openView(r)}>View</button>
-                    <button className="btn btn-outline-primary" onClick={()=>setEditId(r.id)}>Edit</button>
-                    <button className="btn" onClick={()=>{ setViewCustomer(null); openView(r).then(()=>generatePdf(r)); }}>
-                      <i className="fa-regular fa-file-pdf"/> PDF
-                    </button>
-                    <button className="btn" onClick={()=>setEmailFor(r)}><i className="fa-regular fa-envelope"/> Email</button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {!loading && rows.length===0?(
-              <tr><td colSpan={5} className="tiny">No invoices yet.</td></tr>
-            ):null}
+            {(rows||[]).map((r)=>{
+              const c=rowCalc(r);
+              return (
+                <tr key={r.id}>
+                  <td className="mono">{r.code}</td>
+                  <td>{r.title||"—"}</td>
+                  <td>{new Date(r.created_at).toLocaleDateString()}</td>
+                  <td style={{textAlign:"right"}}>${c.pre.toFixed(2)}</td>
+                  <td style={{textAlign:"right"}}>${c.grand.toFixed(2)}</td>
+                  <td style={{textAlign:"right"}}>
+                    <div className="btn-row" style={{justifyContent:"flex-end"}}>
+                      <button className="btn" onClick={()=>openView(r)}>View</button>
+                      <button className="btn" onClick={()=>setEditing(r)}>Edit</button>
+                      <button className="btn" onClick={()=>generatePdf(r)}><i className="fa-regular fa-file-pdf"/> PDF</button>
+                      <button className="btn" onClick={()=>emailInvoice(r)}><i className="fa-regular fa-envelope"/> Email</button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+            {rows.length===0? <tr><td colSpan={6} className="tiny">No invoices yet.</td></tr> : null}
           </tbody>
         </table>
       </div>
 
-      {/* Hidden printable area */}
-      <div ref={printRef} style={{position:'fixed', left:-9999, top:-9999}}/>
-
-      {/* Edit modal */}
-      {editId? <InvoiceEditor invoiceId={editId} onClose={onSaved}/> : null}
-
-      {/* View modal */}
-      {viewRow? (
-        <ViewInvoiceModal
-          row={viewRow}
-          customer={viewCustomer}
-          settings={settings}
-          onClose={()=>{ setViewRow(null); setViewCustomer(null); }}
-        />
-      ) : null}
-
-      {/* Email prompt */}
-      <Confirm
-        open={!!emailFor}
-        title={`Email ${emailFor?.code}`}
-        message={(
-          <span>
-            <label className="tiny">Recipient</label>
-            <input id="invmail" type="email" placeholder="name@example.com" style={{width:'100%'}} defaultValue="" />
-          </span>
-        )}
-        onYes={()=>{
-          const to=document.getElementById('invmail')?.value?.trim();
-          if(!to) return alert('Enter an email');
-          sendEmail(emailFor, to);
-        }}
-        onNo={()=>setEmailFor(null)}
-      />
+      <div ref={printRef} style={{position:"fixed", left:-9999, top:-9999}}/>
     </section>
   );
-}
-
-/* ---------- View modal (read-only detail with full breakdown) ---------- */
-function ViewInvoiceModal({row, customer, settings, onClose}){
-  const items=row?.items||{};
-  const eq=Array.isArray(items.equipments)? items.equipments: [];
-  const mats=Array.isArray(items.materials)? items.materials: [];
-  const adds=Array.isArray(items.addons)? items.addons: [];
-  const labs=Array.isArray(items.labor)? items.labor: [];
-
-  const t=row?.totals||{};
-  const preTax = Number(t.totalChargePreTax ?? t.totalCharge ?? 0);
-  // Use totals.taxPct if present, otherwise fall back to settings.tax_rate
-  const taxPct = Number( (t.taxPct ?? settings?.tax_rate ?? 0) );
-  const tax    = Number(t.tax ?? (preTax*(taxPct/100)));
-  const discount = Number(t.discountAmount ?? 0);
-  const total  = Number(t.grandTotal ?? t.totalAfterTax ?? (preTax - discount + tax));
-  const deposit = Number(t.deposit ?? row?.deposit ?? 0);
-  const due    = Number(t.totalDue ?? (total - deposit));
-  const showInk = !!t.showInkUsage;
-
-  return (
-    <div className="modal" onClick={onClose}>
-      <div className="modal-content wide" onClick={(e)=>e.stopPropagation()}>
-        <div className="row">
-          <h3 style={{margin:0}}>Invoice <span className="tiny mono">#{row?.code}</span></h3>
-          <div className="btn-row">
-            <button className="btn btn-secondary" onClick={onClose}>Close</button>
-          </div>
-        </div>
-
-        {/* Header / parties */}
-        <div className="grid-2" style={{marginTop:12}}>
-          <div className="card">
-            <div style={{fontWeight:700, marginBottom:6}}>{settings?.business_name || 'Shop Manager'}</div>
-            <div className="tiny">{settings?.business_email}</div>
-            <div className="tiny">{settings?.business_phone}</div>
-            <div className="tiny">{settings?.business_address}</div>
-          </div>
-          <div className="card">
-            <div style={{fontWeight:700, marginBottom:6}}>Bill To</div>
-            <div>{customer?.company || customer?.name || '—'}</div>
-            <div className="tiny">{customer?.email}</div>
-            <div className="tiny">{customer?.phone}</div>
-            <div className="tiny">{customer?.address}</div>
-          </div>
-        </div>
-
-        {/* Items breakdown (read-only) */}
-        <div className="card" style={{marginTop:12}}>
-          <h4 style={{marginTop:0}}>Items</h4>
-
-          {/* Equipment */}
-          {eq.length>0? (
-            <>
-              <h5 style={{margin:'8px 0'}}>Equipment</h5>
-              <table className="table">
-                <thead><tr>
-                  <th>Equipment</th>
-                  <th>Mode / Detail</th>
-                </tr></thead>
-                <tbody>
-                  {eq.map((l,i)=>{
-                    const type=(l.type||'').toLowerCase();
-                    const isUV = type.includes('uv') || type.includes('sublimation');
-                    let detail='—';
-                    if(isUV){
-                      const ink=l.inks||{};
-                      const using = l.use_soft_white? 'soft_white':'white';
-                      const parts=[
-                        ink.c>0? `C:${n4(ink.c)}ml`:null,
-                        ink.m>0? `M:${n4(ink.m)}ml`:null,
-                        ink.y>0? `Y:${n4(ink.y)}ml`:null,
-                        ink.k>0? `K:${n4(ink.k)}ml`:null,
-                        ink.gloss>0? `Gloss:${n4(ink.gloss)}ml`:null,
-                        ink[using]>0? `${using==='white'?'White':'Soft White'}:${n4(ink[using])}ml`:null
-                      ].filter(Boolean).join(' • ');
-                      detail = showInk ? (parts || 'Ink usage') : '—';
-                    }else{
-                      detail = (l.mode==='hourly')? `${l.hours||0}h × $${n2(l.rate)}` : (l.mode==='flat'? `Flat $${n2(l.flat_fee)}` : '—');
-                    }
-                    return (
-                      <tr key={i}>
-                        <td>{l.name || l.type || 'Equipment'}</td>
-                        <td>{detail}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </>
-          ):null}
-
-          {/* Materials */}
-          {mats.length>0? (
-            <>
-              <h5 style={{margin:'8px 0'}}>Materials</h5>
-              <table className="table">
-                <thead><tr>
-                  <th>Description</th>
-                  <th>Qty</th>
-                </tr></thead>
-                <tbody>
-                  {mats.map((m,i)=>(
-                    <tr key={i}>
-                      <td>{m.name || m.description || 'Material'}</td>
-                      <td>{Number(m.qty||0)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </>
-          ):null}
-
-          {/* Labor */}
-          {labs.length>0? (
-            <>
-              <h5 style={{margin:'8px 0'}}>Labor</h5>
-              <table className="table">
-                <thead><tr>
-                  <th>Description</th>
-                  <th>Hours × Rate</th>
-                </tr></thead>
-                <tbody>
-                  {labs.map((l,i)=>(
-                    <tr key={i}>
-                      <td>{l.desc||'Labor'}</td>
-                      <td>{n2(l.hours)} × ${n2(l.rate)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </>
-          ):null}
-
-          {/* Add-ons */}
-          {adds.length>0? (
-            <>
-              <h5 style={{margin:'8px 0'}}>Add-ons</h5>
-              <table className="table">
-                <thead><tr>
-                  <th>Name</th>
-                  <th>Qty × Price</th>
-                </tr></thead>
-                <tbody>
-                  {adds.map((a,i)=>(
-                    <tr key={i}>
-                      <td>{a.name || a.description || 'Add-on'}</td>
-                      <td>{Number(a.qty||0)} × ${n2(a.price)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </>
-          ):null}
-        </div>
-
-        {/* Totals (use persisted totals + fallback tax rate) */}
-        <div className="grid-2" style={{marginTop:12}}>
-          <div className="card">
-            <div style={{fontSize:12,color:'#666'}}>Memo</div>
-            <div style={{whiteSpace:'pre-wrap'}}>{row?.memo||'—'}</div>
-          </div>
-            <div className="card">
-              <Row label="Pre-tax" val={preTax}/>
-              {discount!==0? <Row label="Discount" val={-Math.abs(discount)}/> : null}
-              <Row label={`Tax (${n2(taxPct)}%)`} val={tax}/>
-              <div style={{height:1, background:'#eee', margin:'8px 0'}}/>
-              <Row label="Total" val={total} bold/>
-              <Row label="Deposit" val={-Math.abs(deposit)}/>
-              <Row label="Amount Due" val={due} bold/>
-            </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Row({label,val,bold}){
-  return (
-    <div style={{display:'flex', justifyContent:'space-between', margin:'4px 0', fontWeight:bold?700:500}}>
-      <span>{label}</span><span>${n2(val)}</span>
-    </div>
-  );
-}
-
-/* helpers */
-function fmtDate(s){ try{ return new Date(s).toLocaleString(); }catch{ return s||''; } }
-function n2(x){ return Number(x||0).toFixed(2); }
-function n4(x){ return Number(x||0).toFixed(4); }
-function coalesceTotal(row){
-  const t=row?.totals||{};
-  return Number(t.grandTotal ?? t.totalAfterTax ?? t.total ?? t.totalCharge ?? 0);
-}
-
-/* printable html (simple) */
-function renderInvoiceHtml({row, settings, customer}){
-  const t=row?.totals||{};
-  const preTax=(Number(t.totalChargePreTax ?? t.totalCharge ?? 0));
-  const taxPct = Number( (t.taxPct ?? settings?.tax_rate ?? 0) );
-  const tax = Number(t.tax ?? (preTax*(taxPct/100)));
-  const discount=Number(t.discountAmount ?? 0);
-  const total=Number(t.grandTotal ?? t.totalAfterTax ?? (preTax - discount + tax));
-  const dep=Number(t.deposit ?? row?.deposit ?? 0);
-  const due=Number(t.totalDue ?? (total - dep));
-
-  return `
-  <div style="font-family:Arial, sans-serif; padding:24px; width:800px;">
-    <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-      <div>
-        <h2 style="margin:0 0 6px 0;">${escapeHtml(settings?.business_name || 'Shop Manager')}</h2>
-        <div style="font-size:12px; color:#555">${escapeHtml(settings?.business_email || '')}</div>
-        <div style="font-size:12px; color:#555">${escapeHtml(settings?.business_phone || '')}</div>
-        <div style="font-size:12px; color:#555">${escapeHtml(settings?.business_address || '')}</div>
-      </div>
-      <div style="text-align:right;">
-        <div style="font-size:28px; font-weight:700;">INVOICE</div>
-        <div style="font-family:ui-monospace,Menlo,Consolas,monospace"># ${escapeHtml(row.code)}</div>
-        <div style="font-size:12px; color:#555">${new Date(row.created_at).toLocaleDateString()}</div>
-      </div>
-    </div>
-
-    <div style="margin:18px 0; height:1px; background:#eee;"></div>
-
-    <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
-      <div style="padding:12px; border:1px solid #eee; border-radius:8px;">
-        <div style="font-size:12px; color:#666; margin-bottom:6px;">Bill To</div>
-        <div>${escapeHtml(customer?.company || customer?.name || '')}</div>
-        <div style="font-size:12px; color:#555">${escapeHtml(customer?.email || '')}</div>
-        <div style="font-size:12px; color:#555">${escapeHtml(customer?.phone || '')}</div>
-        <div style="font-size:12px; color:#555">${escapeHtml(customer?.address || '')}</div>
-      </div>
-      <div style="padding:12px; border:1px solid #eee; border-radius:8px;">
-        <div style="display:flex; justify-content:space-between; margin:4px 0;"><span>Pre-tax</span><b>$${preTax.toFixed(2)}</b></div>
-        <div style="display:flex; justify-content:space-between; margin:4px 0;"><span>Discount</span><b>-$${discount.toFixed(2)}</b></div>
-        <div style="display:flex; justify-content:space-between; margin:4px 0;"><span>Tax (${taxPct.toFixed(2)}%)</span><b>$${tax.toFixed(2)}</b></div>
-        <div style="display:flex; justify-content:space-between; margin:4px 0;"><span>Deposit</span><b>-$${dep.toFixed(2)}</b></div>
-        <div style="height:1px; background:#eee; margin:8px 0"></div>
-        <div style="display:flex; justify-content:space-between; margin:8px 0; font-size:18px;"><span>Total</span><b>$${total.toFixed(2)}</b></div>
-        <div style="display:flex; justify-content:space-between; margin:8px 0; font-size:18px;"><span>Amount Due</span><b>$${due.toFixed(2)}</b></div>
-      </div>
-    </div>
-
-    <div style="margin-top:18px; padding:12px; border:1px solid #eee; border-radius:8px;">
-      <div style="font-size:12px; color:#666;">Memo</div>
-      <div style="white-space:pre-wrap; font-size:14px;">${escapeHtml(row.memo||'')}</div>
-    </div>
-  </div>`;
-}
-
-function renderEmailHtml({row, settings}){
-  const total=coalesceTotal(row).toFixed(2);
-  return `
-    <div style="font-family:Arial; color:#111">
-      <p>Hi,</p>
-      <p>Please find your invoice <b>${escapeHtml(row.code)}</b> from <b>${escapeHtml(settings?.business_name||'Shop Manager')}</b>.</p>
-      <p><b>Total:</b> $${total}</p>
-      <p>Thank you!</p>
-    </div>
-  `;
-}
-
-function escapeHtml(str){
-  return String(str||'').replace(/[&<>"']/g,(m)=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
 }

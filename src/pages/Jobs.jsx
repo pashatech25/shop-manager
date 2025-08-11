@@ -15,9 +15,12 @@ export default function Jobs(){
   const [editing,setEditing]=useState(null); // null=none, {}=new, row=edit
   const [viewing,setViewing]=useState(null); // completed job row for modal view
 
+  // { [completed_job_id]: {id, code} }
+  const [invoiceByCompletedJob,setInvoiceByCompletedJob]=useState({});
+
   const printRef=useRef(null);
 
-  // ---- reference maps (equip, materials, addons, customers)
+  // -------- reference maps
   const loadMaps=async ()=>{
     if(!tenantId) return {equip:{}, mats:{}, addons:{}, cust:{}};
     const [eq,ma,ad,cu] = await Promise.all([
@@ -33,20 +36,47 @@ export default function Jobs(){
     return {equip, mats, addons, cust};
   };
 
+  // Build a lookup of existing invoices keyed by completed job id.
+  // Supports both:
+  //   - invoices.job_id (if RPC stored completed_job_id there)
+  //   - invoices.items.meta.completed_job_id (JSON path)
+  const loadInvoicesMap = async ()=>{
+    if(!tenantId) return {};
+    const {data, error} = await supabase
+      .from('invoices')
+      .select('id, code, job_id, items')
+      .eq('tenant_id', tenantId);
+    if(error){ console.error(error); return {}; }
+
+    const map = {};
+    (data||[]).forEach(inv=>{
+      const meta = inv.items?.meta || {};
+      const cj = meta.completed_job_id || meta.source_completed_job_id || null;
+      if (cj) {
+        map[cj] = { id: inv.id, code: inv.code };
+      } else if (inv.job_id) {
+        map[inv.job_id] = { id: inv.id, code: inv.code };
+      }
+    });
+    return map;
+  };
+
   const load=async ()=>{
     if(!tenantId) return;
     try{
       setLoading(true); setError("");
-      const [a,c,m]=await Promise.all([
+      const [a,c,m,im]=await Promise.all([
         supabase.from("jobs").select("*").eq("tenant_id", tenantId).order("created_at",{ascending:false}),
         supabase.from("completed_jobs").select("*").eq("tenant_id", tenantId).order("completed_at",{ascending:false}),
-        loadMaps()
+        loadMaps(),
+        loadInvoicesMap()
       ]);
       if(a.error) throw a.error;
       if(c.error) throw c.error;
       setActive(a.data||[]);
       setCompleted(c.data||[]);
       setMaps(m);
+      setInvoiceByCompletedJob(im);
     }catch(ex){
       setError(ex.message||"Failed to load jobs");
     }finally{
@@ -56,7 +86,7 @@ export default function Jobs(){
 
   useEffect(()=>{ load(); },[tenantId]);
 
-  // ---- actions
+  // -------- actions
   const onPdf = async (row, kind='jobs')=>{
     if(!printRef.current){ alert('Printable element not found'); return; }
     printRef.current.innerHTML = renderJobHtml({row, maps});
@@ -73,29 +103,48 @@ export default function Jobs(){
 
   const onComplete = async (row)=>{
     if(!confirm('Complete this job, apply inventory & ink deductions?')) return;
-    // server-side transaction (see SQL below)
-    const {data,error} = await supabase.rpc('complete_job_and_apply_inventory', {
+    const {error} = await supabase.rpc('complete_job_and_apply_inventory', {
       p_job_id: row.id, p_tenant_id: tenantId
     });
     if(error){ console.error(error); alert(error.message); return; }
-    // success: reload
     await load();
   };
 
-  const onGenerateInvoice = async (row)=>{
-    // server-side invoice generation from completed job (see SQL below)
-    const {data,error} = await supabase.rpc('generate_invoice_from_completed_job', {
-      p_completed_job_id: row.id, p_tenant_id: tenantId
+  // One-time invoice generation with client-side guard + optimistic state
+  const onGenerateInvoice = async (completedRow)=>{
+    const cjId = completedRow.id;
+
+    // Client guard: already have an invoice?
+    if (invoiceByCompletedJob[cjId]) {
+      alert(`Invoice already generated: ${invoiceByCompletedJob[cjId].code}`);
+      return;
+    }
+
+    const {data, error} = await supabase.rpc('generate_invoice_from_completed_job', {
+      p_completed_job_id: cjId,
+      p_tenant_id: tenantId
     });
-    if(error){ console.error(error); alert(error.message); return; }
-    alert(`Invoice ${data?.code||'(unknown)'} generated.`);
+
+    if(error){
+      console.error(error);
+      alert(error.message);
+      return;
+    }
+
+    // Optimistic flip
+    if(data?.code){
+      setInvoiceByCompletedJob(prev => ({ ...prev, [cjId]: { id: data.id || 'new', code: data.code } }));
+    } else {
+      setInvoiceByCompletedJob(prev => ({ ...prev, [cjId]: { id: 'new', code: '(created)' } }));
+    }
+
+    await load();
   };
 
   return (
     <section className="section">
       <div className="section-header">
         <h2>Jobs</h2>
-        {/* Was <Link to="/jobs/new"> — that route isn’t defined. Use inline new form instead. */}
         <button className="btn btn-primary" onClick={()=>setEditing({})}>New Job</button>
       </div>
 
@@ -115,7 +164,7 @@ export default function Jobs(){
       {error? <div className="alert alert-danger" style={{marginTop:8}}>{error}</div> : null}
       {loading? <div className="card">Loading…</div> : null}
 
-      {/* Active Jobs list (cards) */}
+      {/* Active Jobs (cards) */}
       <div className="cards" style={{marginTop:16}}>
         {active.map((j)=>(
           <JobCard
@@ -154,8 +203,20 @@ export default function Jobs(){
                 <td style={{textAlign:'right'}}>
                   <div className="btn-row" style={{justifyContent:'flex-end'}}>
                     <button className="btn" onClick={()=>setViewing(r)}>Job Details</button>
-                    <button className="btn" onClick={()=>onPdf(r,'completed-jobs')}><i className="fa-regular fa-file-pdf"/> PDF</button>
-                    <button className="btn btn-secondary" onClick={()=>onGenerateInvoice(r)}>Generate Invoice</button>
+                    <button className="btn" onClick={()=>onPdf(r,'completed-jobs')}>
+                      <i className="fa-regular fa-file-pdf"/> PDF
+                    </button>
+
+                    {/* One-time invoice generation UI */}
+                    {invoiceByCompletedJob[r.id] ? (
+                      <button className="btn btn-success" disabled title={`Invoice ${invoiceByCompletedJob[r.id].code} already generated`}>
+                        Invoice Generated
+                      </button>
+                    ) : (
+                      <button className="btn btn-secondary" onClick={()=>onGenerateInvoice(r)}>
+                        Generate Invoice
+                      </button>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -167,11 +228,13 @@ export default function Jobs(){
         </table>
       </div>
 
-      {/* View modal for completed job */}
+      {/* View completed job modal */}
       {viewing? (
         <JobViewModal
           row={viewing}
           maps={maps}
+          hasInvoice={!!invoiceByCompletedJob[viewing.id]}
+          invCode={invoiceByCompletedJob[viewing.id]?.code}
           onClose={()=>setViewing(null)}
           onPdf={()=>onPdf(viewing,'completed-jobs')}
           onGenerateInvoice={()=>onGenerateInvoice(viewing)}
@@ -200,7 +263,6 @@ function JobCard({row, maps, onEdit, onPdf, onComplete, onDelete}){
           {created? created.toLocaleString() : ''} • {sum.customerLabel}
         </div>
 
-        {/* Mini breakdown similar to Quotes */}
         <div className="tiny" style={{marginBottom:6}}>
           {sum.eqLines.length? <b>Equipment:</b> : null} {sum.eqLabel}
         </div>
@@ -253,7 +315,7 @@ function InkDot({color,label}){
 
 /* ============================ Completed job modal ============================ */
 
-function JobViewModal({row, maps, onClose, onPdf, onGenerateInvoice}){
+function JobViewModal({row, maps, hasInvoice, invCode, onClose, onPdf, onGenerateInvoice}){
   const sum = useMemo(()=>summarize(row, maps),[row, maps]);
   const completed = row.completed_at? new Date(row.completed_at) : null;
 
@@ -262,9 +324,15 @@ function JobViewModal({row, maps, onClose, onPdf, onGenerateInvoice}){
       <div className="modal-content wide" onClick={(e)=>e.stopPropagation()}>
         <div className="row">
           <h3 style={{margin:0}}>Job <span className="tiny mono">#{row.code}</span></h3>
-        <div className="btn-row">
+          <div className="btn-row">
             <button className="btn" onClick={onPdf}><i className="fa-regular fa-file-pdf"/> PDF</button>
-            <button className="btn btn-secondary" onClick={onGenerateInvoice}>Generate Invoice</button>
+            {hasInvoice ? (
+              <button className="btn btn-success" disabled title={`Invoice ${invCode} already generated`}>
+                Invoice Generated
+              </button>
+            ) : (
+              <button className="btn btn-secondary" onClick={onGenerateInvoice}>Generate Invoice</button>
+            )}
             <button className="btn" onClick={onClose}>Close</button>
           </div>
         </div>
@@ -307,7 +375,7 @@ function SectionList({title, lines}){
   );
 }
 
-/* ============================ Shared summarize (same colors as Quotes) ============================ */
+/* ============================ summarize + PDF ============================ */
 
 function summarize(row, maps){
   const items=row.items||{};
@@ -390,8 +458,6 @@ function summarize(row, maps){
   };
 }
 function fmt$(n){ const v=Number(n||0); return `$${v.toFixed(2)}`; }
-
-/* ============================ PDF HTML ============================ */
 
 function renderJobHtml({row, maps}){
   const sum=summarize(row, maps);
