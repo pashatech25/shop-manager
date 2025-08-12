@@ -82,7 +82,7 @@ export default function Settings(){
     defaultValues:{quote_prefix:'Q-', quote_counter:1, job_prefix:'J-', job_counter:1, invoice_prefix:'INV-', invoice_counter:1}
   });
 
-  // New per-trigger webhooks form (single form with all fields)
+  // Per-trigger webhooks form (single form with all fields)
   const w=useForm({
     resolver:zodResolver(webhookSchema),
     defaultValues:{
@@ -230,6 +230,134 @@ export default function Settings(){
     setMaterialTypes((xs)=>xs.filter((x)=>x.id!==id)); toast.info('Deleted');
   };
 
+  /* =================== Data & Exports helpers =================== */
+
+  const downloadCsv = (filename, rows) => {
+    if(!rows || rows.length===0){ toast.info('Nothing to export'); return; }
+    const esc = (v) => {
+      if (v==null) return '';
+      const s = String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+    };
+    const headers = Object.keys(rows[0]);
+    const csv = [
+      headers.join(','),
+      ...rows.map(r => headers.map(h => esc(r[h])).join(','))
+    ].join('\n');
+
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportInvoices = async ()=>{
+    try{
+      if(!tenantId) return;
+      const {data:inv, error} = await supabase
+        .from('invoices')
+        .select('id, code, created_at, customer_id, job_id, totals, discount_type, discount_value, discount_apply_tax, deposit_amount')
+        .eq('tenant_id', tenantId)
+        .order('created_at', {ascending:false});
+      if(error) throw error;
+
+      // build customer map
+      const {data:customers} = await supabase
+        .from('customers')
+        .select('id, name, company')
+        .eq('tenant_id', tenantId);
+      const cMap = new Map((customers||[]).map(c => [c.id, c]));
+
+      const rows = (inv||[]).map(r=>{
+        const totals = r.totals||{};
+        const subtotal = Number(totals.totalCharge||0);  // pre-tax
+        const tax = Number(totals.tax||0);
+        const afterTax = Number(totals.totalAfterTax ?? totals.grand ?? (subtotal + tax));
+
+        // discount calc
+        let discount = 0;
+        if (r.discount_type === 'percent') {
+          const base = (r.discount_apply_tax ? afterTax : subtotal);
+          discount = (Number(r.discount_value||0) / 100) * base;
+        } else if (r.discount_type === 'flat') {
+          discount = Number(r.discount_value||0);
+        }
+
+        const deposit = Number(r.deposit_amount||0);
+        const total = afterTax - discount; // reported total; deposit is separate column
+
+        const cust = cMap.get(r.customer_id);
+        const customerName = cust ? (cust.company ? `${cust.company} — ${cust.name}` : cust.name) : '';
+
+        return {
+          'Invoice #': r.code,
+          'Date': r.created_at ? new Date(r.created_at).toLocaleString() : '',
+          'Customer': customerName,
+          'Job #': r.job_id || '',
+          'Subtotal': subtotal.toFixed(2),
+          'Tax': tax.toFixed(2),
+          'Discount': discount.toFixed(2),
+          'Deposit': deposit.toFixed(2),
+          'Total': total.toFixed(2)
+        };
+      });
+
+      downloadCsv('invoices.csv', rows);
+    }catch(e){
+      console.error(e);
+      toast.error(e.message||'Export failed');
+    }
+  };
+
+  const exportCustomers = async ()=>{
+    try{
+      if(!tenantId) return;
+      const {data, error} = await supabase
+        .from('customers')
+        .select('name, company, email, phone')
+        .eq('tenant_id', tenantId)
+        .order('name', {ascending:true});
+      if(error) throw error;
+
+      const rows = (data||[]).map(c => ({
+        'Name': c.name||'',
+        'Company': c.company||'',
+        'Email': c.email||'',
+        'Phone': c.phone||''
+      }));
+
+      downloadCsv('customers.csv', rows);
+    }catch(e){
+      console.error(e);
+      toast.error(e.message||'Export failed');
+    }
+  };
+
+  const exportVendors = async ()=>{
+    try{
+      if(!tenantId) return;
+      const {data, error} = await supabase
+        .from('vendors')
+        .select('name, email, phone')
+        .eq('tenant_id', tenantId)
+        .order('name', {ascending:true});
+      if(error) throw error;
+
+      const rows = (data||[]).map(v => ({
+        'Name': v.name||'',
+        'Email': v.email||'',
+        'Phone': v.phone||''
+      }));
+
+      downloadCsv('vendors.csv', rows);
+    }catch(e){
+      console.error(e);
+      toast.error(e.message||'Export failed');
+    }
+  };
+
   return (
     <section className="section">
       <div className="section-header"><h2>Settings</h2>{loading? <span className="tiny">Loading…</span>:null}</div>
@@ -302,7 +430,7 @@ export default function Settings(){
       </div>
 
       {/* Webhooks – per-trigger */}
-      <div className="card">
+      <div className="card" style={{marginBottom:16}}>
         <h3>Webhooks</h3>
         <p className="tiny" style={{marginTop:6}}>Set a separate endpoint/secret per event. Only enabled rows will fire.</p>
 
@@ -350,10 +478,21 @@ export default function Settings(){
             </tbody>
           </table>
 
-            <div className="row" style={{justifyContent:'flex-end', marginTop:10}}>
-              <button className="btn btn-primary">Save Webhooks</button>
-            </div>
+          <div className="row" style={{justifyContent:'flex-end', marginTop:10}}>
+            <button className="btn btn-primary">Save Webhooks</button>
+          </div>
         </form>
+      </div>
+
+      {/* Data & Exports */}
+      <div className="card">
+        <h3>Data & Exports</h3>
+        <p className="tiny" style={{marginTop:6}}>Export your data as CSV files.</p>
+        <div className="btn-row" style={{marginTop:8}}>
+          <button className="btn" onClick={exportInvoices}><i className="fa-regular fa-file-lines"/> Export Invoices (CSV)</button>
+          <button className="btn" onClick={exportCustomers}><i className="fa-regular fa-address-book"/> Export Customers (CSV)</button>
+          <button className="btn" onClick={exportVendors}><i className="fa-regular fa-building"/> Export Vendors (CSV)</button>
+        </div>
       </div>
     </section>
   );

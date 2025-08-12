@@ -1,83 +1,65 @@
-import React, {useEffect, useState} from "react";
-import {Link, useLocation} from "react-router-dom";
+import React, { useEffect, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 
-export default function SideNav(){
-  const [collapsed,setCollapsed] = useState(false);
-  const {pathname} = useLocation();
+export default function SideNav() {
+  const [collapsed, setCollapsed] = useState(false);
+  const { pathname } = useLocation();
 
-  useEffect(()=>{
+  useEffect(() => {
     document.body.classList.toggle("sidebar-collapsed", collapsed);
-  },[collapsed]);
+  }, [collapsed]);
 
-  const isActive=(to)=> pathname.startsWith(to);
+  const isActive = (to) => pathname.startsWith(to);
+
+  const menuItems = [
+    { to: "/dashboard", icon: "fa-solid fa-gauge-high", label: "Dashboard" },
+    { to: "/quotes", icon: "fa-solid fa-file-pen", label: "Quotes" },
+    { to: "/jobs", icon: "fa-solid fa-briefcase", label: "Jobs" },
+    { to: "/invoices", icon: "fa-solid fa-file-invoice-dollar", label: "Invoices" },
+    { to: "/materials", icon: "fa-solid fa-boxes-stacked", label: "Materials" },
+    { to: "/vendors", icon: "fa-solid fa-truck-field", label: "Vendors" },
+    { to: "/inventory", icon: "fa-solid fa-box-open", label: "Inventory" },
+    { to: "/purchase-orders", icon: "fa-solid fa-receipt", label: "Purchase Orders" },
+    { to: "/customers", icon: "fa-solid fa-user-group", label: "Customers" },
+    { to: "/addons", icon: "fa-solid fa-puzzle-piece", label: "Add-ons" },
+    { to: "/shop", icon: "fa-solid fa-screwdriver-wrench", label: "Shop" },
+    { to: "/reports", icon: "fa-solid fa-chart-line", label: "Reports" },
+    { to: "/settings", icon: "fa-solid fa-gear", label: "Settings" }
+  ];
 
   return (
-    <aside id="sidebar-container">
-      <nav className={`side-nav ${collapsed ? "collapsed" : ""}`}>
-        <button
-          className="collapse-toggle"
-          title={collapsed ? "Expand" : "Collapse"}
-          onClick={()=>setCollapsed((v)=>!v)}
-        >
-          <i className="fa-solid fa-angles-left" />
-        </button>
+    <>
+    
 
-        <div className="logo">
-          <div>Shop Manager</div>
-          <small>Multi-tenant</small>
-        </div>
+      <aside id="sidebar-container">
+        <nav className={`floating-nav ${collapsed ? "collapsed" : ""}`}>
+          <button
+            className="collapse-toggle"
+            title={collapsed ? "Expand" : "Collapse"}
+            onClick={() => setCollapsed((v) => !v)}
+          >
+            <i className="fa-solid fa-angles-left" />
+          </button>
 
-        <Link to="/dashboard" className={`nav-link ${isActive("/dashboard")?"active":""}`}>
-          <i className="fa-solid fa-gauge-high" /><span>Dashboard</span>
-        </Link>
+          <div className="logo-section">
+            <div className="logo-title">Shop Manager</div>
+            <div className="logo-subtitle">Multi-tenant</div>
+          </div>
 
-        <Link to="/quotes" className={`nav-link ${isActive("/quotes")?"active":""}`}>
-          <i className="fa-solid fa-file-pen" /><span>Quotes</span>
-        </Link>
-
-        <Link to="/jobs" className={`nav-link ${isActive("/jobs")?"active":""}`}>
-          <i className="fa-solid fa-briefcase" /><span>Jobs</span>
-        </Link>
-
-        <Link to="/invoices" className={`nav-link ${isActive("/invoices")?"active":""}`}>
-          <i className="fa-solid fa-file-invoice-dollar" /><span>Invoices</span>
-        </Link>
-
-        <Link to="/materials" className={`nav-link ${isActive("/materials")?"active":""}`}>
-          <i className="fa-solid fa-boxes-stacked" /><span>Materials</span>
-        </Link>
-
-        <Link to="/vendors" className={`nav-link ${isActive("/vendors")?"active":""}`}>
-          <i className="fa-solid fa-truck-field" /><span>Vendors</span>
-        </Link>
-<Link to="/inventory" className={`nav-link ${isActive("/inventory")?"active":""}`}>
-  <i className="fa-solid fa-box-open"/><span>Inventory</span>
-</Link>
-<Link to="/purchase-orders" className={`nav-link ${isActive("/purchase-orders")?"active":""}`}>
-  <i className="fa-solid fa-receipt"/><span>Purchase Orders</span>
-</Link>
-
-
-        <Link to="/customers" className={`nav-link ${isActive("/customers")?"active":""}`}>
-          <i className="fa-solid fa-user-group" /><span>Customers</span>
-        </Link>
-
-        <Link to="/addons" className={`nav-link ${isActive("/addons")?"active":""}`}>
-          <i className="fa-solid fa-puzzle-piece" /><span>Add-ons</span>
-        </Link>
-
-        <Link to="/shop" className={`nav-link ${isActive("/shop")?"active":""}`}>
-          <i className="fa-solid fa-screwdriver-wrench" /><span>Shop</span>
-        </Link>
-
-        <Link to="/reports" className={`nav-link ${isActive("/reports")?"active":""}`}>
-          <i className="fa-solid fa-chart-line" /><span>Reports</span>
-        </Link>
-
-        <Link to="/settings" className={`nav-link ${isActive("/settings")?"active":""}`}>
-          <i className="fa-solid fa-gear" /><span>Settings</span>
-        </Link>
-      </nav>
-    </aside>
+          {menuItems.map((item) => (
+            <Link
+              key={item.to}
+              to={item.to}
+              className={`nav-item ${isActive(item.to) ? "active" : ""}`}
+            >
+              <div className="nav-icon">
+                <i className={item.icon} />
+              </div>
+              <span className="nav-text">{item.label}</span>
+            </Link>
+          ))}
+        </nav>
+      </aside>
+    </>
   );
 }
