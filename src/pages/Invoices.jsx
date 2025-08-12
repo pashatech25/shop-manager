@@ -114,13 +114,13 @@ function computeBill(preTax, {type, value, applyTax, deposit}, taxRatePct){
   const discountAmt = (type==="percent") ? (preTax * (num(value)/100)) : num(value);
 
   if (applyTax) {
-    // discount before tax
+    // discount BEFORE tax
     const base = Math.max(0, preTax - discountAmt);
     const tax  = base * (num(taxRatePct)/100);
     const grand = Math.max(0, base + tax - num(deposit));
     return {discountAmt, tax, grand};
   } else {
-    // discount AFTER tax (this was the bug before)
+    // discount AFTER tax
     const tax  = preTax * (num(taxRatePct)/100);
     const subtotalAfterTax = preTax + tax;
     const grand = Math.max(0, subtotalAfterTax - discountAmt - num(deposit));
@@ -140,6 +140,7 @@ export default function Invoices(){
 
   // Email + PDF preview
   const [emailFor, setEmailFor] = useState(null);
+  const [emailDefault, setEmailDefault] = useState(""); // <-- prefill here
   const [pdfUrl, setPdfUrl] = useState("");
   const [pdfOpen, setPdfOpen] = useState(false);
   const printRef=useRef(null);
@@ -231,7 +232,26 @@ export default function Invoices(){
     setPdfOpen(true);
   };
 
-  /* ---------- Email ---------- */
+  /* ---------- Email: open modal prefilled with customer email ---------- */
+  const openEmail = async (r)=>{
+    setEmailDefault("");
+    try{
+      let def = "";
+      if(r?.customer_id){
+        const {data} = await supabase
+          .from("customers")
+          .select("email")
+          .eq("id", r.customer_id)
+          .maybeSingle();
+        def = data?.email || "";
+      }
+      setEmailDefault(def);
+    }catch(e){
+      // ignore; keep empty fallback
+    }
+    setEmailFor(r);
+  };
+
   const emailInvoice = async (r, to)=>{
     try{
       const {matMap, eqMap} = await loadPriceMaps(tenantId);
@@ -269,6 +289,7 @@ export default function Invoices(){
       if(error) throw error;
       alert('Email sent.');
       setEmailFor(null);
+      setEmailDefault("");
     }catch(ex){
       console.error(ex);
       alert(ex.message || "Failed to send email");
@@ -310,7 +331,7 @@ export default function Invoices(){
               <h3>Invoice <span className="tiny mono">#{viewRow.code}</span></h3>
               <div className="btn-row">
                 <button className="btn" onClick={()=>generatePdf(viewRow)}><i className="fa-regular fa-file-pdf"/> PDF</button>
-                <button className="btn" onClick={()=>setEmailFor(viewRow)}><i className="fa-regular fa-envelope"/> Email</button>
+                <button className="btn" onClick={()=>openEmail(viewRow)}><i className="fa-regular fa-envelope"/> Email</button>
                 <button className="btn btn-secondary" onClick={()=>setViewRow(null)}>Close</button>
               </div>
             </div>
@@ -378,7 +399,7 @@ export default function Invoices(){
                       <button className="btn" onClick={()=>openView(r)}>View</button>
                       <button className="btn" onClick={()=>setEditing(r)}>Edit</button>
                       <button className="btn" onClick={()=>generatePdf(r)}><i className="fa-regular fa-file-pdf"/> PDF</button>
-                      <button className="btn" onClick={()=>setEmailFor(r)}><i className="fa-regular fa-envelope"/> Email</button>
+                      <button className="btn" onClick={()=>openEmail(r)}><i className="fa-regular fa-envelope"/> Email</button>
                     </div>
                   </td>
                 </tr>
@@ -396,7 +417,13 @@ export default function Invoices(){
         message={(
           <span>
             <label className="tiny">Recipient</label>
-            <input id="invmail" type="email" placeholder="name@company.com" style={{width:'100%'}} defaultValue="" />
+            <input
+              id="invmail"
+              type="email"
+              placeholder="name@company.com"
+              style={{width:'100%'}}
+              defaultValue={emailDefault || ""}
+            />
           </span>
         )}
         onYes={()=>{
@@ -404,7 +431,7 @@ export default function Invoices(){
           if(!to) return alert('Enter an email');
           emailInvoice(emailFor, to);
         }}
-        onNo={()=>setEmailFor(null)}
+        onNo={()=>{ setEmailFor(null); setEmailDefault(""); }}
       />
 
       {/* PDF preview modal */}

@@ -112,36 +112,32 @@ export default function PurchaseOrders() {
     }
   };
 
-  // email sender (unchanged – uses your edge function)
-  // inside PurchaseOrders.jsx
-const sendEmail = async (po, to) => {
-  try {
-    const vendor = vendorsMap?.[po.vendor_id] || {};
-    const subject = `Purchase Order ${po.code}`;
-    const html = renderPOEmail({ po, vendor });
+  // email sender — prefill vendor email, allow override
+  const sendEmail = async (po, to) => {
+    try {
+      const vendor = vendorsMap?.[po.vendor_id] || {};
+      const subject = `Purchase Order ${po.code}`;
+      const html = renderPOEmail({ po, vendor });
 
-    let attachments;
-    if (po.pdf_path) {
-      const { data, error } = await supabase
-        .storage
-        .from("pdfs")
-        .createSignedUrl(po.pdf_path, 60 * 60);
-
-      if (!error && data?.signedUrl) {
-        attachments = [{ filename: `${po.code}.pdf`, url: data.signedUrl }];
+      let attachments;
+      if (po.pdf_path) {
+        const { data, error } = await supabase
+          .storage
+          .from("pdfs")
+          .createSignedUrl(po.pdf_path, 60 * 60);
+        if (!error && data?.signedUrl) {
+          attachments = [{ filename: `${po.code}.pdf`, url: data.signedUrl }];
+        }
       }
+
+      await sendEmailDoc({ to, subject, html, attachments });
+      alert("Email sent.");
+      setEmailFor(null);
+    } catch (err) {
+      console.error("Email error:", err);
+      alert(err.message || "Failed to send email");
     }
-
-    // calls the helper above -> Edge function
-    await sendEmailDoc({ to, subject, html, attachments });
-    alert("Email sent.");
-    setEmailFor(null);
-  } catch (err) {
-    console.error("Email error:", err);
-    alert(err.message || "Failed to send email");
-  }
-};
-
+  };
 
   return (
     <section className="section">
@@ -311,7 +307,7 @@ const sendEmail = async (po, to) => {
       {/* Hidden print region for html2canvas */}
       <div ref={printRef} style={{ position: "fixed", left: -9999, top: -9999 }} />
 
-      {/* Email confirm */}
+      {/* Email confirm (prefill vendor email, can override) */}
       <Confirm
         open={!!emailFor}
         title={`Email ${emailFor?.code}`}
@@ -323,7 +319,7 @@ const sendEmail = async (po, to) => {
               type="email"
               placeholder="name@vendor.com"
               style={{ width: "100%" }}
-              defaultValue=""
+              defaultValue={emailFor ? (vendorsMap[emailFor.vendor_id]?.email || "") : ""}
             />
           </span>
         }
