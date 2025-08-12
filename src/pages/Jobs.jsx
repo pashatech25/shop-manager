@@ -3,6 +3,7 @@ import {supabase} from "../lib/superbase.js";
 import {useTenant} from "../context/TenantContext.jsx";
 import SalesForm from "../features/forms/SalesForm.jsx";
 import {captureElementToPdf} from "../features/pdf/service.js";
+import { webhookJobCompleted, webhookInvoiceGenerated } from "../features/webhook/api.js";
 
 export default function Jobs(){
   const {tenantId}=useTenant();
@@ -58,6 +59,69 @@ export default function Jobs(){
     return map;
   };
 
+  // (kept in case you still use it elsewhere)
+  const enqueueWebhook = async (event, payload) => {
+    try {
+      if (!tenantId) return;
+      const { error } = await supabase.from('webhook_deliveries').insert({
+        tenant_id: tenantId,
+        event,
+        status: 'queued',
+        payload
+      });
+      if (error) console.warn('webhook enqueue failed', error);
+    } catch (e) {
+      console.warn('webhook enqueue failed', e);
+    }
+  };
+
+  const makeJobPayload = (jobRow) => {
+    const items = jobRow?.items || {};
+    const eq = items.equipments || [];
+    const mats = items.materials || [];
+    const ad = items.addons || [];
+    const lab = items.labor || [];
+
+    const customer = maps.cust[jobRow.customer_id] || null;
+
+    const expandEquip = eq.map(l=>{
+      const e = maps.equip[l.equipment_id];
+      return {...l, equipment_name: e?.name||null, equipment_type: e?.type||null};
+    });
+    const expandMats = mats.map(m=>{
+      const mm = maps.mats[m.material_id];
+      return {...m, material_name: mm?.name||null, purchase_price:mm?.purchase_price??null, selling_price:mm?.selling_price??null};
+    });
+    const expandAddons = ad.map(a=>{
+      const aa = maps.addons[a.addon_id];
+      return {...a, addon_name: aa?.name||null};
+    });
+
+    return {
+      job: {
+        id: jobRow.id,
+        code: jobRow.code,
+        title: jobRow.title,
+        status: jobRow.status,
+        created_at: jobRow.created_at,
+        completed_at: jobRow.completed_at,
+        totals: jobRow.totals || {},
+      },
+      customer: customer ? {
+        id: customer.id,
+        name: customer.name,
+        company: customer.company,
+        email: customer.email
+      } : null,
+      items: {
+        equipments: expandEquip,
+        materials: expandMats,
+        addons: expandAddons,
+        labor: lab
+      }
+    };
+  };
+
   const load=async ()=>{
     if(!tenantId) return;
     try{
@@ -105,6 +169,18 @@ export default function Jobs(){
       p_job_id: row.id, p_tenant_id: tenantId
     });
     if(error){ console.error(error); alert(error.message); return; }
+
+    // ✅ FIRE WEBHOOK using your helper (pass the job row; helper fetches customer)
+    try{
+      await webhookJobCompleted(tenantId, {
+        ...row,
+        status: 'completed',
+        completed_at: new Date().toISOString()
+      });
+    }catch(e){
+      console.warn('webhookJobCompleted failed:', e);
+    }
+
     await load();
   };
 
@@ -112,7 +188,6 @@ export default function Jobs(){
   const onGenerateInvoice = async (completedRow)=>{
     const cjId = completedRow.id;
 
-    // Client guard: already have an invoice?
     if (invoiceByCompletedJob[cjId]) {
       alert(`Invoice already generated: ${invoiceByCompletedJob[cjId].code}`);
       return;
@@ -129,10 +204,50 @@ export default function Jobs(){
       return;
     }
 
+    // optimistic UI (your existing code)
     if(data?.code){
       setInvoiceByCompletedJob(prev => ({ ...prev, [cjId]: { id: data.id || 'new', code: data.code } }));
     } else {
       setInvoiceByCompletedJob(prev => ({ ...prev, [cjId]: { id: 'new', code: '(created)' } }));
+    }
+
+    // ✅ Load the created invoice and fire webhook via helper
+    try{
+      let invRow = null;
+
+      if (data?.id) {
+        const { data:inv } = await supabase
+          .from('invoices')
+          .select('*')
+          .eq('tenant_id', tenantId)
+          .eq('id', data.id)
+          .maybeSingle();
+        invRow = inv || null;
+      } else if (data?.code) {
+        const { data:inv } = await supabase
+          .from('invoices')
+          .select('*')
+          .eq('tenant_id', tenantId)
+          .eq('code', data.code)
+          .maybeSingle();
+        invRow = inv || null;
+      } else {
+        const { data:inv } = await supabase
+          .from('invoices')
+          .select('*')
+          .eq('tenant_id', tenantId)
+          .eq('items->meta->>completed_job_id', cjId)
+          .order('created_at', {ascending:false})
+          .limit(1)
+          .maybeSingle();
+        invRow = inv || null;
+      }
+
+      if (invRow) {
+        await webhookInvoiceGenerated(tenantId, invRow);
+      }
+    }catch(e){
+      console.warn('webhookInvoiceGenerated failed:', e);
     }
 
     await load();
@@ -190,7 +305,7 @@ export default function Jobs(){
               <th style={{textAlign:'right'}}>Actions</th>
             </tr>
           </thead>
-        <tbody>
+          <tbody>
             {completed.map((r)=>(
               <tr key={r.id}>
                 <td className="mono">{r.code}</td>

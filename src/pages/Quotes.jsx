@@ -3,6 +3,8 @@ import {supabase} from '../lib/superbase.js';
 import {useTenant} from '../context/TenantContext.jsx';
 import SalesForm from '../features/forms/SalesForm.jsx';
 import {captureElementToPdf} from '../features/pdf/service.js';
+import { webhookQuoteToJob } from "../features/webhook/api.js";
+
 
 export default function Quotes(){
   const {tenantId}=useTenant();
@@ -48,6 +50,73 @@ export default function Quotes(){
 
   useEffect(()=>{ load(); },[tenantId]);
 
+  // 🔔 WEBHOOK: small helper to enqueue a webhook delivery row
+  const enqueueWebhook = async (event, payload) => {
+    try{
+      if(!tenantId) return;
+      await supabase.from('webhook_deliveries').insert({
+        tenant_id: tenantId,
+        event,
+        status: 'queued',
+        payload
+      });
+    }catch(e){
+      // never break UX on webhook issues
+      console.warn('webhook enqueue failed', e);
+    }
+  };
+
+  // 🔔 WEBHOOK payload builder with expanded + summarized info
+  const makeQuotePayload = (quoteRow) => {
+    const items = quoteRow?.items || {};
+    const eq = items.equipments || [];
+    const mats = items.materials || [];
+    const ad = items.addons || [];
+    const lab = items.labor || [];
+    const customer = maps.cust[quoteRow.customer_id] || null;
+
+    // expand names for convenience
+    const expandEquip = eq.map(l=>{
+      const e = maps.equip[l.equipment_id];
+      return {...l, equipment_name: e?.name||null, equipment_type: e?.type||null};
+    });
+    const expandMats = mats.map(m=>{
+      const mm = maps.mats[m.material_id];
+      return {...m, material_name: mm?.name||null, purchase_price:mm?.purchase_price??null, selling_price:mm?.selling_price??null};
+    });
+    const expandAddons = ad.map(a=>{
+      const aa = maps.addons[a.addon_id];
+      return {...a, addon_name: aa?.name||null};
+    });
+
+    // human-readable summary (same logic as card)
+    const summary = summarizeQuote(quoteRow, maps);
+
+    return {
+      quote: {
+        id: quoteRow.id,
+        code: quoteRow.code,
+        title: quoteRow.title,
+        created_at: quoteRow.created_at,
+        status: quoteRow.status,
+        totals: quoteRow.totals || {},
+      },
+      customer: customer ? {
+        id: customer.id,
+        name: customer.name,
+        company: customer.company,
+        email: customer.email
+      } : null,
+      items: {
+        equipments: expandEquip,
+        materials: expandMats,
+        addons: expandAddons,
+        labor: lab
+      },
+      summary // {eqLines, inkDots, inkTotal, matLines, addonLines, laborLines, labels}
+    };
+  };
+
   const convertToJob = async (quote)=>{
     try{
       const {data:codeRow, error:codeErr} = await supabase
@@ -67,10 +136,28 @@ export default function Quotes(){
       const ins = await supabase.from("jobs").insert(payload).select("*").single();
       if(ins.error) throw ins.error;
 
+      await webhookQuoteToJob(tenantId, {
+  ...makeQuotePayload(quote), // all the quote details
+  job: {
+    id: ins.data.id,
+    code: ins.data.code,
+    created_at: ins.data.created_at,
+    status: ins.data.status
+  }
+}).catch((e)=>console.warn("webhookQuoteToJob failed:", e));
+
+
       await supabase.from("quotes").delete().eq("id", quote.id).eq("tenant_id", tenantId);
+
+      // 🔔 WEBHOOK: quote → job
+      enqueueWebhook("quote.converted_to_job", {
+        ...makeQuotePayload(quote),
+        job: { id: ins.data.id, code: ins.data.code, created_at: ins.data.created_at, status: ins.data.status }
+      });
 
       alert(`Converted to Job ${ins.data.code}`);
       await load();
+      
     }catch(ex){
       console.error(ex);
       alert(ex.message || "Conversion failed");
@@ -97,7 +184,10 @@ export default function Quotes(){
           <SalesForm
             kind="quote"
             row={Object.keys(editing).length? editing:null}
-            onSaved={()=>{
+            onSaved={(saved)=>{           {/* 🔔 WEBHOOK: quote.created */}
+              if(saved?.id){
+                enqueueWebhook("quote.created", makeQuotePayload(saved));
+              }
               setEditing(null);
               load();
             }}

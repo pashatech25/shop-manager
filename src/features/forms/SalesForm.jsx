@@ -1,3 +1,5 @@
+// ADD near other imports
+import { webhookQuoteCreated } from "../../features/webhook/api.js";
 import React, {useEffect, useMemo, useState} from "react";
 import {useTenant} from "../../context/TenantContext.jsx";
 import {supabase} from "../../lib/superbase.js";
@@ -201,6 +203,9 @@ export default function SalesForm({kind="quote", row=null, onSaved}){
       setTitle(""); setCustomerId(""); setMarginPct(100);
       setEqLines([]); setMatLines([]); setAddonLines([]); setLaborLines([]);
       onSaved?.(created);
+      // AFTER successful insert of a quote
+await webhookQuoteCreated(tenantId, created).catch((e)=>console.warn("webhookQuoteCreated failed:", e));
+
     }catch(ex){
       console.error(ex);
       toast.error(ex.message||"Save failed");
