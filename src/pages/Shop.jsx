@@ -75,7 +75,7 @@ export default function Shop(){
   return (
     <section id="shop-section">
       <div className="d-flex align-items-center justify-content-between">
-        <h2 className="m-0">Shop — Equipment</h2>
+        <h2 className="m-0">Shop â€" Equipment</h2>
         <button className="btn btn-primary new-button" onClick={onCreate}>New Equipment</button>
       </div>
 
@@ -85,59 +85,82 @@ export default function Shop(){
         </div>
       )}
 
-      {loading && <div className="shadow-box mt-3">Loading equipments…</div>}
+      {open && (
+        <div className="mt-3">
+          <EquipmentForm
+            tenantId={tenantId}
+            initial={editing}
+            onClose={onClose}
+            onSaved={onSaved}
+          />
+        </div>
+      )}
+
+      {loading && <div className="shadow-box mt-3">Loading equipmentsâ€¦</div>}
       {error && <div className="alert alert-danger mt-3">{error}</div>}
 
       <div id="shop-list" className="mt-3">
-        {items.map((eq)=>(
-          <div className="equipment-item" key={eq.id}>
-            <div className="d-flex align-items-center justify-content-between">
-              <div>
-                <h4 className="mb-1">{eq.name} <small className="text-muted">({eq.type})</small></h4>
-                {eq.description && <div className="text-muted small">{eq.description}</div>}
-                {(eq.type==="UV Printer" || eq.type==="Sublimation Printer") && (
-                  <div className="mt-2 small">
-                    <strong>Ink threshold:</strong> {eq.threshold_pct ?? 20}%
-                    <div className="d-flex gap-2 mt-1 flex-wrap">
-                      {["c","m","y","k","gloss","white","soft_white"].map((c)=>{
-                        const key = c==="soft_white"?"ink_level_soft_white":(c==="gloss"?"ink_level_gloss":`ink_level_${c}`);
-                        const val = eq[key];
-                        if(val==null) return null;
-                        const label = c==="soft_white"?"Soft White":(c==="gloss"?"Gloss":c.toUpperCase());
-                        return <span key={c} className={`badge ${val<=eq.threshold_pct?"bg-danger":"bg-secondary"}`}>{label}: {val}%</span>;
-                      })}
-                      {eq.use_soft_white!=null && (
-                        <span className="badge bg-info">{eq.use_soft_white ? "Using Soft White" : "Using White"}</span>
+        {(!loading && items.length > 0) && (
+          <div className="table-responsive">
+            <table className="table table-striped table-bordered">
+              <thead className="table-dark">
+                <tr>
+                  <th>Equipment Name & Type</th>
+                  <th>Description</th>
+                  <th>Details</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((eq)=>(
+                  <tr key={eq.id}>
+                    <td>
+                      <h5 className="mb-1">{eq.name}</h5>
+                      <small className="text-muted">({eq.type})</small>
+                    </td>
+                    <td>
+                      {eq.description && <div className="text-muted small">{eq.description}</div>}
+                    </td>
+                    <td>
+                      {(eq.type==="UV Printer" || eq.type==="Sublimation Printer") && (
+                        <div className="small">
+                          <strong>Ink threshold:</strong> {eq.threshold_pct ?? 20}%
+                          <div className="d-flex gap-2 mt-1 flex-wrap">
+                            {["c","m","y","k","gloss","white","soft_white"].map((c)=>{
+                              const key = c==="soft_white"?"ink_level_soft_white":(c==="gloss"?"ink_level_gloss":`ink_level_${c}`);
+                              const val = eq[key];
+                              if(val==null) return null;
+                              const label = c==="soft_white"?"Soft White":(c==="gloss"?"Gloss":c.toUpperCase());
+                              return <span key={c} className={`badge ${val<=eq.threshold_pct?"bg-danger":"bg-secondary"}`}>{label}: {val}%</span>;
+                            })}
+                            {eq.use_soft_white!=null && (
+                              <span className="badge bg-info">{eq.use_soft_white ? "Using Soft White" : "Using White"}</span>
+                            )}
+                          </div>
+                        </div>
                       )}
-                    </div>
-                  </div>
-                )}
-                {lasers.includes(eq.type) && (
-                  <div className="mt-2 small">
-                    <strong>Laser details:</strong> Power & brand are captured in description for now.
-                  </div>
-                )}
-              </div>
-              <div className="buttons d-flex gap-2">
-                <button className="btn btn-sm btn-outline-primary" onClick={()=>onEdit(eq)}>Edit</button>
-                <button className="btn btn-sm btn-outline-danger" onClick={()=>remove(eq.id)}>Delete</button>
-              </div>
-            </div>
+                      {lasers.includes(eq.type) && (
+                        <div className="small">
+                          <strong>Laser details:</strong> Power & brand are captured in description for now.
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      <div className="d-flex gap-2">
+                        <button className="btn btn-sm btn-outline-primary" onClick={()=>onEdit(eq)}>Edit</button>
+                        <button className="btn btn-sm btn-outline-danger" onClick={()=>remove(eq.id)}>Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        ))}
+        )}
         {(!loading && items.length===0 && tenantId) && (
-          <div className="shadow-box">No equipment yet. Click “New Equipment”.</div>
+          <div className="shadow-box">No equipment yet. Click â€œNew Equipmentâ€.</div>
         )}
       </div>
-
-      {open && (
-        <EquipmentForm
-          tenantId={tenantId}
-          initial={editing}
-          onClose={onClose}
-          onSaved={onSaved}
-        />
-      )}
     </section>
   );
 }
