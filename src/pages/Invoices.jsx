@@ -4,8 +4,20 @@ import {supabase} from "../lib/superbase.js";
 import Editor from "../features/invoices/Editor.jsx";
 import {captureElementToPdf} from "../features/pdf/service.js";
 import Confirm from "../features/ui/Confirm.jsx";
+// email templates (exactly like PO page)
+import {
+  renderTemplate,
+  invoiceDefaults,
+  buildInvoiceContext,
+} from "../features/email/templates.js";
+import { sendEmailDoc } from "../lib/email.js";
 
-/* ---------------- helpers ---------------- */
+
+
+/* ========================================================================== */
+/*                               HELPER FUNCTIONS                            */
+/* ========================================================================== */
+
 const num = (v, d=0)=> {
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
@@ -128,42 +140,50 @@ function computeBill(preTax, {type, value, applyTax, deposit}, taxRatePct){
   }
 }
 
-/* ---------------- component ---------------- */
-export default function Invoices(){
-  const {tenantId}=useTenant();
-  const [rows,setRows]=useState([]);
-  const [editing,setEditing]=useState(null);
+/* ========================================================================== */
+/*                                MAIN COMPONENT                             */
+/* ========================================================================== */
 
-  const [viewRow,setViewRow]=useState(null);
-  const [viewCustomer,setViewCustomer]=useState(null);
-  const [settings,setSettings]=useState(null);
+export default function Invoices(){
+  // ==================== STATE ====================
+  const {tenantId} = useTenant();
+  const [rows, setRows] = useState([]);
+  const [editing, setEditing] = useState(null);
+
+  const [viewRow, setViewRow] = useState(null);
+  const [viewCustomer, setViewCustomer] = useState(null);
+  const [settings, setSettings] = useState(null);
 
   // Email + PDF preview
   const [emailFor, setEmailFor] = useState(null);
   const [emailDefault, setEmailDefault] = useState(""); // <-- prefill here
   const [pdfUrl, setPdfUrl] = useState("");
   const [pdfOpen, setPdfOpen] = useState(false);
-  const printRef=useRef(null);
+  const printRef = useRef(null);
 
-  const load=async ()=>{
+  // ==================== DATA LOADING ====================
+  
+  const load = async () => {
     if(!tenantId) return;
-    const {data}=await supabase
+    const {data} = await supabase
       .from("invoices")
       .select("*")
       .eq("tenant_id", tenantId)
       .order("created_at",{ascending:false});
     setRows(data||[]);
-    const {data:st}=await supabase
+    const {data:st} = await supabase
       .from("settings")
       .select("tax_rate,currency")
       .eq("tenant_id", tenantId)
       .maybeSingle();
     setSettings(st||{tax_rate:0,currency:"USD"});
   };
+  
   useEffect(()=>{ load(); },[tenantId]);
 
-  /* ---------- VIEW ---------- */
-  const openView=async (row)=>{
+  // ==================== INVOICE VIEW ====================
+  
+  const openView = async (row) => {
     setViewRow(null); setViewCustomer(null);
     const [custRes, maps] = await Promise.all([
       row?.customer_id
@@ -197,8 +217,9 @@ export default function Invoices(){
     setViewRow({...row, totals});
   };
 
-  /* ---------- PDF ---------- */
-  const generatePdf=async (r)=>{
+  // ==================== PDF GENERATION ====================
+  
+  const generatePdf = async (r) => {
     if(!printRef.current) return;
     const {matMap, eqMap} = await loadPriceMaps(tenantId);
     const marginPct = r?.items?.meta?.marginPct ?? 100;
@@ -227,13 +248,14 @@ export default function Invoices(){
       </div>`;
     printRef.current.innerHTML = html;
 
-    const {url}=await captureElementToPdf({element: printRef.current, tenantId, kind:"invoices", code:r.code});
+    const {url} = await captureElementToPdf({element: printRef.current, tenantId, kind:"invoices", code:r.code});
     setPdfUrl(url);
     setPdfOpen(true);
   };
 
-  /* ---------- Email: open modal prefilled with customer email ---------- */
-  const openEmail = async (r)=>{
+  // ==================== EMAIL FUNCTIONALITY ====================
+  
+  const openEmail = async (r) => {
     setEmailDefault("");
     try{
       let def = "";
@@ -252,53 +274,96 @@ export default function Invoices(){
     setEmailFor(r);
   };
 
-  const emailInvoice = async (r, to)=>{
-    try{
-      const {matMap, eqMap} = await loadPriceMaps(tenantId);
-      const marginPct = r?.items?.meta?.marginPct ?? 100;
-      const charges = recomputeChargesFromItems(r?.items, {matMap, eqMap}, marginPct);
-      const disc = extractDiscountModel(r);
-      const bill = computeBill(charges.preTax, disc, settings?.tax_rate);
+// Sends the invoice email using the saved (or default) template.
+// Expects: tenantId in scope, supabase import, and a Confirm modal that passes `to`.
+// Call with: await emailInvoice(inv, to)
+async function emailInvoice(inv, to) {
+  try {
+    // 1) Load customer (so we can prefill and render name)
+    const { data: customer } = await supabase
+      .from("customers")
+      .select("id,name,company,email")
+      .eq("id", inv.customer_id)
+      .maybeSingle();
 
-      const html = `
-        <div style="font-family:Arial; color:#111">
-          <p>Please find invoice <b>${r.code}</b> below.</p>
-          <table style="width:100%;border-collapse:collapse;font-size:14px">
-            <tbody>
-              <tr><td>Equipment</td><td style="text-align:right">$${num(charges.equipmentCharge).toFixed(2)}</td></tr>
-              <tr><td>Materials</td><td style="text-align:right">$${num(charges.materialsCharge).toFixed(2)}</td></tr>
-              <tr><td>Labor</td><td style="text-align:right">$${num(charges.laborCharge).toFixed(2)}</td></tr>
-              <tr><td>Add-ons</td><td style="text-align:right">$${num(charges.addonsCharge).toFixed(2)}</td></tr>
-              ${disc.showInk? `<tr><td>UV/Sublimation Ink (margin applied)</td><td style="text-align:right">$${num(charges.inkCharge).toFixed(2)}</td></tr>`:""}
-              <tr><td>Subtotal</td><td style="text-align:right">$${num(charges.preTax).toFixed(2)}</td></tr>
-              <tr><td>Discount</td><td style="text-align:right">−$${num(bill.discountAmt).toFixed(2)}</td></tr>
-              <tr><td>Tax (${num(settings?.tax_rate).toFixed(2)}%)</td><td style="text-align:right">$${num(bill.tax).toFixed(2)}</td></tr>
-              <tr><td>Deposit</td><td style="text-align:right">−$${num(disc.deposit).toFixed(2)}</td></tr>
-              <tr><td><b>Total</b></td><td style="text-align:right"><b>$${num(bill.grand).toFixed(2)}</b></td></tr>
-            </tbody>
-          </table>
-          <p>Thank you.</p>
-        </div>`;
+    // 2) Load settings — includes business info + optional custom template
+    const { data: settings, error: setErr } = await supabase
+      .from("settings")
+      .select(`
+        business_name,business_email,
+        brand_logo_url,brand_logo_path,
+        email_invoice_subject,email_invoice_template_html
+      `)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+    if (setErr) throw setErr;
 
-      let attachments;
-      const guess = `${tenantId}/invoices/${r.code}.pdf`;
-      const { data:sign } = await supabase.storage.from("pdfs").createSignedUrl(guess, 3600);
-      if(sign?.signedUrl){ attachments = [{ filename: `${r.code}.pdf`, url: sign.signedUrl }]; }
-
-      const {error}=await supabase.functions.invoke('email-doc',{body:{to, subject:`Invoice ${r.code}`, html, attachments}});
-      if(error) throw error;
-      alert('Email sent.');
-      setEmailFor(null);
-      setEmailDefault("");
-    }catch(ex){
-      console.error(ex);
-      alert(ex.message || "Failed to send email");
+    // 3) Attach PDF if present
+    let pdfUrl = "";
+    if (inv.pdf_path) {
+      const { data: signed } = await supabase
+        .storage
+        .from("pdfs")
+        .createSignedUrl(inv.pdf_path, 60 * 60);
+      if (signed?.signedUrl) pdfUrl = signed.signedUrl;
     }
-  };
 
-  /* ---------- list row calc (for table totals) ---------- */
-  const rowCalc = (r)=>{
-    const t=r?.totals||{};
+    // 4) Money context from invoice.totals (fall back to 0’s safely)
+    const t = inv?.totals || {};
+    const money = {
+      subtotal: Number(t.totalChargePreTax ?? t.subtotal ?? 0),
+      tax:      Number(t.tax ?? 0),
+      discount: Number(
+        // support either totals.discount or existing discount_amount fields you store
+        t.discount ?? inv.discount_amount ?? 0
+      ),
+      deposit:  Number(
+        t.deposit ?? inv.deposit_amount ?? 0
+      ),
+      grand:    Number(
+        t.grand ??
+        // fallback: subtotal + tax - discount - deposit
+        (Number(t.totalChargePreTax ?? t.subtotal ?? 0)
+         + Number(t.tax ?? 0)
+         - Number(t.discount ?? inv.discount_amount ?? 0)
+         - Number(t.deposit ?? inv.deposit_amount ?? 0))
+      ),
+    };
+
+    // 5) Pick template strings (custom or defaults)
+    const dft     = invoiceDefaults();                 // { subject, html }
+    const subjTpl = settings?.email_invoice_subject    || dft.subject;
+    const htmlTpl = settings?.email_invoice_template_html || dft.html;
+
+    // 6) Build rendering context and render both subject and html
+    const ctx = buildInvoiceContext({
+      invoice: inv,
+      customer,
+      settings,
+      money,
+      pdfUrl,
+    });
+    const subject = renderTemplate(subjTpl, ctx);
+    const html    = renderTemplate(htmlTpl, ctx);
+
+    // 7) Optional attachment (links are already in the html as well)
+    const attachments = pdfUrl ? [{ filename: `${inv.code}.pdf`, url: pdfUrl }] : undefined;
+
+    // 8) Fire!
+    await sendEmailDoc({ to, subject, html, attachments });
+    alert("Email sent.");
+    // If you keep a modal state like setEmailFor(null), do it here
+  } catch (err) {
+    console.error("Email error:", err);
+    alert(err.message || "Failed to send email");
+  }
+}
+
+
+  // ==================== TABLE CALCULATIONS ====================
+  
+  const rowCalc = (r) => {
+    const t = r?.totals||{};
     const recomputedPre = num(t.totalChargePreTax,
       num(t.equipmentCharge)+num(t.materialsCharge)+num(t.laborCharge)+num(t.addonsCharge)+num(t.inkCharge)
     );
@@ -307,6 +372,8 @@ export default function Invoices(){
     return {pre: recomputedPre, discountAmt, tax, grand};
   };
 
+  // ==================== RENDER ====================
+  
   return (
     <section className="section">
       <div className="section-header"><h2>Invoices</h2></div>
@@ -324,54 +391,19 @@ export default function Invoices(){
         </div>
       ):null}
 
+      {/* INVOICE VIEW MODAL */}
       {viewRow? (
-        <div className="modal" onClick={()=>setViewRow(null)}>
-          <div className="modal-content" onClick={(e)=>e.stopPropagation()}>
-            <div className="row">
-              <h3>Invoice <span className="tiny mono">#{viewRow.code}</span></h3>
-              <div className="btn-row">
-                <button className="btn" onClick={()=>generatePdf(viewRow)}><i className="fa-regular fa-file-pdf"/> PDF</button>
-                <button className="btn" onClick={()=>openEmail(viewRow)}><i className="fa-regular fa-envelope"/> Email</button>
-                <button className="btn btn-secondary" onClick={()=>setViewRow(null)}>Close</button>
-              </div>
-            </div>
-            <div className="tiny">Created: {new Date(viewRow.created_at).toLocaleString()}</div>
-
-            {viewCustomer? (
-              <div className="card" style={{marginTop:10}}>
-                <b>Customer</b>
-                <div className="tiny">{viewCustomer.company||viewCustomer.name}</div>
-                <div className="tiny">{viewCustomer.email}</div>
-                <div className="tiny">{viewCustomer.phone}</div>
-                <div className="tiny">{viewCustomer.address}</div>
-              </div>
-            ):null}
-
-            {(()=>{
-              const t=viewRow?.totals||{};
-              const disc = extractDiscountModel(viewRow);
-              const {discountAmt, tax, grand} = computeBill(num(t.totalChargePreTax), disc, settings?.tax_rate);
-              return (
-                <div className="card" style={{marginTop:10}}>
-                  <b>Charges</b>
-                  <div className="tiny">Equipment: ${num(t.equipmentCharge).toFixed(2)}</div>
-                  <div className="tiny">Materials: ${num(t.materialsCharge).toFixed(2)}</div>
-                  <div className="tiny">Labor: ${num(t.laborCharge).toFixed(2)}</div>
-                  <div className="tiny">Add-ons: ${num(t.addonsCharge).toFixed(2)}</div>
-                  {disc.showInk? <div className="tiny">UV/Sublimation Ink: ${num(t.inkCharge).toFixed(2)}</div> : null}
-                  <div className="tiny"><b>Subtotal</b>: ${num(t.totalChargePreTax).toFixed(2)}</div>
-                  <div className="tiny">Discount: −${num(discountAmt).toFixed(2)}</div>
-                  <div className="tiny">Tax ({num(settings?.tax_rate).toFixed(2)}%): ${num(tax).toFixed(2)}</div>
-                  <div className="tiny">Deposit: −${num(disc.deposit).toFixed(2)}</div>
-                  <div className="tiny"><b>Total</b>: ${num(grand).toFixed(2)}</div>
-                </div>
-              );
-            })()}
-          </div>
-        </div>
+        <InvoiceViewModal
+          viewRow={viewRow}
+          viewCustomer={viewCustomer}
+          settings={settings}
+          onClose={() => setViewRow(null)}
+          onGeneratePdf={() => generatePdf(viewRow)}
+          onOpenEmail={() => openEmail(viewRow)}
+        />
       ):null}
 
-      {/* List */}
+      {/* INVOICES TABLE */}
       <div className="table-wrap" style={{marginTop:16}}>
         <table className="table">
           <thead>
@@ -410,6 +442,8 @@ export default function Invoices(){
         </table>
       </div>
 
+      {/* MODALS */}
+      
       {/* Email modal */}
       <Confirm
         open={!!emailFor}
@@ -450,7 +484,248 @@ export default function Invoices(){
         </div>
       ):null}
 
+      {/* Hidden print element */}
       <div ref={printRef} style={{position:"fixed", left:-9999, top:-9999}}/>
     </section>
+  );
+}
+
+/* ========================================================================== */
+/*                             INVOICE VIEW MODAL                            */
+/* ========================================================================== */
+
+function InvoiceViewModal({viewRow, viewCustomer, settings, onClose, onGeneratePdf, onOpenEmail}) {
+  const t = viewRow?.totals || {};
+  const disc = extractDiscountModel(viewRow);
+  const {discountAmt, tax, grand} = computeBill(num(t.totalChargePreTax), disc, settings?.tax_rate);
+
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-content wide" onClick={(e)=>e.stopPropagation()}>
+        
+        {/* MODAL HEADER */}
+        <InvoiceModalHeader 
+          invoiceCode={viewRow.code}
+          onGeneratePdf={onGeneratePdf}
+          onOpenEmail={onOpenEmail}
+          onClose={onClose}
+        />
+        
+        {/* INVOICE INFO HEADER */}
+        <InvoiceInfoHeader 
+          createdAt={viewRow.created_at}
+          title={viewRow.title}
+        />
+
+        {/* MODAL CONTENT */}
+        <div className="modal-body" style={{maxHeight:'60vh', overflowY:'auto', padding:'8px 0'}}>
+          
+          {/* CUSTOMER SECTION */}
+          {viewCustomer && (
+            <InvoiceDetailSection title="Customer Information" icon="👤">
+              <CustomerInfo customer={viewCustomer} />
+            </InvoiceDetailSection>
+          )}
+
+          {/* CHARGES BREAKDOWN SECTION */}
+          <InvoiceDetailSection title="Charges Breakdown" icon="💰">
+            <ChargesBreakdown 
+              totals={t}
+              discount={disc}
+              discountAmt={discountAmt}
+              tax={tax}
+              taxRate={settings?.tax_rate}
+              grand={grand}
+            />
+          </InvoiceDetailSection>
+
+        </div>
+        
+      </div>
+    </div>
+  );
+}
+
+/* ========================================================================== */
+/*                         INVOICE MODAL SUB-COMPONENTS                      */
+/* ========================================================================== */
+
+function InvoiceModalHeader({invoiceCode, onGeneratePdf, onOpenEmail, onClose}) {
+  return (
+    <div className="row" style={{borderBottom: '1px solid #eee', paddingBottom: '12px', marginBottom: '16px'}}>
+      <div>
+        <h3 style={{margin:0, fontSize:'24px', fontWeight:'600'}}>
+          Invoice Details
+        </h3>
+        <div className="tiny mono" style={{color:'#666', marginTop:'4px'}}>
+          #{invoiceCode}
+        </div>
+      </div>
+      <div className="btn-row">
+        <button className="btn" onClick={onGeneratePdf} title="Generate PDF">
+          <i className="fa-regular fa-file-pdf"/> PDF
+        </button>
+        <button className="btn" onClick={onOpenEmail} title="Email Invoice">
+          <i className="fa-regular fa-envelope"/> Email
+        </button>
+        <button className="btn" onClick={onClose} title="Close modal">
+          <i className="fa-solid fa-times"/>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function InvoiceInfoHeader({createdAt, title}) {
+  return (
+    <div className="invoice-info-header" style={{
+      background: '#f8f9fa', 
+      padding: '12px 16px', 
+      borderRadius: '8px', 
+      marginBottom: '20px',
+      border: '1px solid #e9ecef'
+    }}>
+      <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'8px'}}>
+        <h4 style={{margin:0, fontSize:'18px', color:'#333'}}>{title || 'Invoice'}</h4>
+        <span className="badge" style={{background:'#28a745', color:'white'}}>
+          Active
+        </span>
+      </div>
+      <div style={{fontSize:'14px', color:'#666'}}>
+        <i className="fa-regular fa-calendar"/> Created: {new Date(createdAt).toLocaleString()}
+      </div>
+    </div>
+  );
+}
+
+function InvoiceDetailSection({title, icon, children}) {
+  return (
+    <div className="detail-section" style={{marginBottom:'16px'}}>
+      <div style={{
+        display:'flex', 
+        alignItems:'center', 
+        gap:'8px', 
+        marginBottom:'8px',
+        paddingBottom:'6px',
+        borderBottom:'2px solid #f0f0f0'
+      }}>
+        <span style={{fontSize:'18px'}}>{icon}</span>
+        <h4 style={{margin:0, fontSize:'16px', fontWeight:'600', color:'#333'}}>{title}</h4>
+      </div>
+      <div style={{paddingLeft:'18px'}}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function CustomerInfo({customer}) {
+  return (
+    <div style={{
+      padding:'12px', 
+      background:'#f8f9fa', 
+      borderRadius:'8px',
+      border:'1px solid #e9ecef'
+    }}>
+      <div style={{marginBottom:'8px', fontSize:'16px', fontWeight:'600', color:'#333'}}>
+        {customer.company || customer.name}
+      </div>
+      {customer.email && (
+        <div style={{marginBottom:'4px', fontSize:'14px', color:'#666'}}>
+          <i className="fa-regular fa-envelope" style={{marginRight:'8px'}}/>
+          {customer.email}
+        </div>
+      )}
+      {customer.phone && (
+        <div style={{marginBottom:'4px', fontSize:'14px', color:'#666'}}>
+          <i className="fa-solid fa-phone" style={{marginRight:'8px'}}/>
+          {customer.phone}
+        </div>
+      )}
+      {customer.address && (
+        <div style={{fontSize:'14px', color:'#666'}}>
+          <i className="fa-solid fa-location-dot" style={{marginRight:'8px'}}/>
+          {customer.address}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChargesBreakdown({totals, discount, discountAmt, tax, taxRate, grand}) {
+  return (
+    <div style={{
+      padding:'16px', 
+      background:'#f8f9fa', 
+      borderRadius:'8px',
+      border:'1px solid #e9ecef'
+    }}>
+      {/* Line Items */}
+      <div style={{marginBottom:'16px'}}>
+        <ChargeLineItem label="Equipment" amount={num(totals.equipmentCharge)} />
+        <ChargeLineItem label="Materials" amount={num(totals.materialsCharge)} />
+        <ChargeLineItem label="Labor" amount={num(totals.laborCharge)} />
+        <ChargeLineItem label="Add-ons" amount={num(totals.addonsCharge)} />
+        {discount.showInk && (
+          <ChargeLineItem label="UV/Sublimation Ink" amount={num(totals.inkCharge)} />
+        )}
+      </div>
+
+      {/* Subtotal */}
+      <div style={{
+        borderTop:'1px solid #dee2e6', 
+        paddingTop:'12px', 
+        marginBottom:'12px'
+      }}>
+        <ChargeLineItem label="Subtotal" amount={num(totals.totalChargePreTax)} bold />
+      </div>
+
+      {/* Adjustments */}
+      <div style={{marginBottom:'12px'}}>
+        <ChargeLineItem label="Discount" amount={-num(discountAmt)} color="#dc3545" />
+        <ChargeLineItem label={`Tax (${num(taxRate).toFixed(2)}%)`} amount={num(tax)} />
+        <ChargeLineItem label="Deposit" amount={-num(discount.deposit)} color="#dc3545" />
+      </div>
+
+      {/* Total */}
+      <div style={{
+        borderTop:'2px solid #dee2e6', 
+        paddingTop:'12px',
+        background:'white',
+        borderRadius:'6px',
+        padding:'12px'
+      }}>
+        <ChargeLineItem label="Total" amount={num(grand)} bold large />
+      </div>
+    </div>
+  );
+}
+
+function ChargeLineItem({label, amount, bold = false, large = false, color = null}) {
+  const isNegative = amount < 0;
+  const displayAmount = Math.abs(amount);
+  
+  return (
+    <div style={{
+      display:'flex', 
+      justifyContent:'space-between', 
+      alignItems:'center',
+      marginBottom:'6px',
+      fontSize: large ? '18px' : '14px'
+    }}>
+      <span style={{
+        fontWeight: bold ? '600' : '400',
+        color: color || '#333'
+      }}>
+        {label}
+      </span>
+      <span style={{
+        fontWeight: bold ? '700' : '500',
+        color: color || (isNegative ? '#dc3545' : '#333'),
+        fontSize: large ? '20px' : '14px'
+      }}>
+        {isNegative ? '−' : ''}${displayAmount.toFixed(2)}
+      </span>
+    </div>
   );
 }

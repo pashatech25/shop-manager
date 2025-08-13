@@ -155,61 +155,99 @@ export default function Editor({row, onClose, onSaved}){
     <div>
       <h3 className="m-0">Edit Invoice <span className="tiny mono">#{row.code}</span></h3>
 
-      <div className="grid-3" style={{marginTop:12}}>
+      <div className="grid-3" style={{marginTop:12, gap:12}}>
+        
+        {/* BASE CHARGES */}
         <div className="card">
-          <b>Charges</b>
-          <div className="tiny">Equipment: ${Number(t.equipmentCharge||0).toFixed(2)}</div>
-          <div className="tiny">UV/Sublimation Ink: ${Number(t.inkCharge||0).toFixed(2)}</div>
-          <div className="tiny">Materials: ${Number(t.materialsCharge||0).toFixed(2)}</div>
-          <div className="tiny">Labor: ${Number(t.laborCharge||0).toFixed(2)}</div>
-          <div className="tiny">Add-ons: ${Number(t.addonsCharge||0).toFixed(2)}</div>
-          <div className="tiny"><b>Pre-Tax</b>: ${calc.preTax.toFixed(2)}</div>
+          <div style={{display:'flex', alignItems:'center', gap:6, marginBottom:8}}>
+            <div style={{width:16, height:16, backgroundColor:'#e0e0e0', borderRadius:2}}></div>
+            <b style={{fontSize:13, color:'#555'}}>BASE CHARGES</b>
+          </div>
+          <div className="tiny">Equipment: <span style={{color:'#2563eb', fontWeight:'500'}}>${Number(t.equipmentCharge||0).toFixed(2)}</span></div>
+          <div className="tiny">UV/Sublimation Ink: <span style={{color:'#7c3aed', fontWeight:'500'}}>${Number(t.inkCharge||0).toFixed(2)}</span></div>
+          <div className="tiny">Materials: <span style={{color:'#059669', fontWeight:'500'}}>${Number(t.materialsCharge||0).toFixed(2)}</span></div>
+          <div className="tiny">Labor: <span style={{color:'#dc2626', fontWeight:'500'}}>${Number(t.laborCharge||0).toFixed(2)}</span></div>
+          <div className="tiny">Add-ons: <span style={{color:'#ea580c', fontWeight:'500'}}>${Number(t.addonsCharge||0).toFixed(2)}</span></div>
+          <div className="tiny" style={{marginTop:6, paddingTop:6, borderTop:'1px solid #eee'}}>
+            <b>Subtotal: <span style={{color:'#1f2937', fontSize:'13px', backgroundColor:'#f3f4f6', padding:'2px 6px', borderRadius:'4px'}}>${calc.preTax.toFixed(2)}</span></b>
+          </div>
         </div>
 
+        {/* ADJUSTMENTS */}
         <div className="card">
-          <b>Adjustments</b>
-          <div className="group">
-            <label>Discount Type</label>
-            <select value={discountType} onChange={(e)=>setDiscountType(e.target.value)}>
-              <option value="percent">Percent %</option>
-              <option value="flat">Flat</option>
-            </select>
+          <div style={{display:'flex', alignItems:'center', gap:6, marginBottom:8}}>
+            <div style={{width:16, height:16, backgroundColor:'#d0d0d0', borderRadius:2}}></div>
+            <b style={{fontSize:13, color:'#555'}}>ADJUSTMENTS</b>
           </div>
-          <div className="group">
-            <label>Discount {discountType==="percent"?"(%)":"(amount)"}</label>
-            <input type="number" step="0.01" value={discountValue} onChange={(e)=>setDiscountValue(e.target.value)} />
+          <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:8}}>
+            <div className="group">
+              <label style={{fontSize:11}}>Type</label>
+              <select value={discountType} onChange={(e)=>setDiscountType(e.target.value)} style={{fontSize:12}}>
+                <option value="percent">Percent %</option>
+                <option value="flat">Flat $</option>
+              </select>
+            </div>
+            <div className="group">
+              <label style={{fontSize:11}}>Discount</label>
+              <input type="number" step="0.01" value={discountValue} onChange={(e)=>setDiscountValue(e.target.value)} style={{fontSize:12}} />
+            </div>
           </div>
-          <div className="group" style={{display:"flex", alignItems:"center", gap:8}}>
+          <div className="group" style={{marginBottom:8}}>
+            <label style={{fontSize:11}}>Deposit</label>
+            <input type="number" step="0.01" value={deposit} onChange={(e)=>setDeposit(e.target.value)} style={{fontSize:12}} />
+          </div>
+          <div style={{display:"flex", alignItems:"center", gap:6, fontSize:11}}>
             <input id="applytax" type="checkbox" checked={discountApplyTax} onChange={(e)=>setDiscountApplyTax(e.target.checked)} />
             <label htmlFor="applytax">Apply tax after discount</label>
           </div>
-          <div className="group">
-            <label>Deposit</label>
-            <input type="number" step="0.01" value={deposit} onChange={(e)=>setDeposit(e.target.value)} />
-          </div>
-          <div className="tiny">Tax rate: {Number(settings?.tax_rate||0).toFixed(2)}%</div>
+          {discountValue > 0 && (
+            <div style={{marginTop:6, padding:'4px 8px', backgroundColor:'#fef3c7', borderRadius:'4px', border:'1px solid #f59e0b'}}>
+              <span style={{fontSize:10, color:'#92400e'}}>💰 Discount: <span style={{fontWeight:'bold', color:'#d97706'}}>-${calc.discountAmt.toFixed(2)}</span></span>
+            </div>
+          )}
+          {deposit > 0 && (
+            <div style={{marginTop:4, padding:'4px 8px', backgroundColor:'#dcfce7', borderRadius:'4px', border:'1px solid #16a34a'}}>
+              <span style={{fontSize:10, color:'#166534'}}>🏦 Deposit: <span style={{fontWeight:'bold', color:'#15803d'}}>-${Number(deposit||0).toFixed(2)}</span></span>
+            </div>
+          )}
         </div>
 
+        {/* TOTALS */}
         <div className="card">
-          <b>Totals</b>
-          <div className="tiny">Discount: −${calc.discountAmt.toFixed(2)}</div>
-          <div className="tiny">Tax: ${calc.tax.toFixed(2)}</div>
-          <div className="tiny">Deposit: −${Number(deposit||0).toFixed(2)}</div>
-          <div className="tiny"><b>Grand Total</b>: ${calc.grand.toFixed(2)}</div>
-          <div className="group" style={{marginTop:10, display:"flex", alignItems:"center", gap:8}}>
+          <div style={{display:'flex', alignItems:'center', gap:6, marginBottom:8}}>
+            <div style={{width:16, height:16, backgroundColor:'#c0c0c0', borderRadius:2}}></div>
+            <b style={{fontSize:13, color:'#555'}}>FINAL TOTALS</b>
+          </div>
+          <div className="tiny">Tax ({Number(settings?.tax_rate||0).toFixed(1)}%): <span style={{color:'#7c2d12', fontWeight:'500'}}>${calc.tax.toFixed(2)}</span></div>
+          <div className="tiny">Discount: <span style={{color:'#d97706', fontWeight:'600'}}>−${calc.discountAmt.toFixed(2)}</span></div>
+          <div className="tiny">Deposit: <span style={{color:'#15803d', fontWeight:'600'}}>−${Number(deposit||0).toFixed(2)}</span></div>
+          <div className="tiny" style={{marginTop:6, paddingTop:6, borderTop:'1px solid #333'}}>
+            <b>Grand Total: <span style={{fontSize:'14px', color:'#fff', backgroundColor:'#1f2937', padding:'3px 8px', borderRadius:'6px', boxShadow:'0 2px 4px rgba(0,0,0,0.1)'}}>${calc.grand.toFixed(2)}</span></b>
+          </div>
+          <div style={{display:"flex", alignItems:"center", gap:6, marginTop:10, fontSize:11}}>
             <input id="showink" type="checkbox" checked={showInkUsage} onChange={(e)=>setShowInkUsage(e.target.checked)} />
-            <label htmlFor="showink">Show ink usage on invoice/PDF</label>
+            <label htmlFor="showink">Show ink usage on PDF</label>
           </div>
         </div>
       </div>
 
-      <div className="group" style={{marginTop:12}}>
-        <label>Invoice Memo</label>
-        <textarea rows={4} value={memo} onChange={(e)=>setMemo(e.target.value)} />
+      {/* MEMO SECTION */}
+      <div style={{marginTop:12}}>
+        <div style={{display:'flex', alignItems:'center', gap:6, marginBottom:6}}>
+          <div style={{width:16, height:16, backgroundColor:'#b0b0b0', borderRadius:2}}></div>
+          <label style={{fontSize:13, color:'#555', fontWeight:'bold'}}>INVOICE MEMO</label>
+        </div>
+        <textarea 
+          rows={3} 
+          value={memo} 
+          onChange={(e)=>setMemo(e.target.value)}
+          style={{fontSize:12, width:'100%', resize:'vertical'}}
+          placeholder="Internal notes or special instructions..."
+        />
       </div>
 
-      <div className="btn-row" style={{marginTop:12}}>
-        <button className="btn btn-primary" onClick={onSave}>Save</button>
+      <div className="btn-row" style={{marginTop:12, paddingTop:12, borderTop:'1px solid #eee'}}>
+        <button className="btn btn-primary" onClick={onSave}>Save Changes</button>
         <button className="btn btn-secondary" onClick={onClose}>Close</button>
       </div>
     </div>

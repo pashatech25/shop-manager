@@ -20,6 +20,9 @@ import { captureElementToPdf } from "../features/pdf/service.js";
 import { supabase } from "../lib/superbase.js";
 import { sendEmailDoc } from "../lib/email.js";
 
+// NEW: templates
+import { renderTemplate, poDefaults, buildPOContext } from "../features/email/templates.js";
+
 export default function PurchaseOrders() {
   const { tenantId } = useTenant();
   const [loading, setLoading] = useState(true);
@@ -35,7 +38,7 @@ export default function PurchaseOrders() {
   const [emailFor, setEmailFor] = useState(null);
   const printRef = useRef(null);
 
-  // NEW: PDF preview modal state
+  // PDF preview modal state
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState("");
 
   // New PO form
@@ -76,7 +79,7 @@ export default function PurchaseOrders() {
     await load();
   };
 
-  // UPDATED: generate and preview PDF in a modal (no alert)
+  // generate + preview PDF
   const generatePdf = async (po) => {
     try {
       const el = printRef.current;
@@ -90,7 +93,6 @@ export default function PurchaseOrders() {
         items: poItems,
       });
 
-      // 1) Render & upload to Storage
       const { path, url } = await captureElementToPdf({
         element: el,
         tenantId,
@@ -98,13 +100,8 @@ export default function PurchaseOrders() {
         code: po.code,
       });
 
-      // 2) Persist path on the PO row (so you can email later)
       await savePOPdfPath(po.id, path);
-
-      // 3) Open a preview modal
       setPdfPreviewUrl(url);
-
-      // 4) Refresh list so the "PDF" column shows the path
       await load();
     } catch (err) {
       console.error(err);
@@ -112,32 +109,81 @@ export default function PurchaseOrders() {
     }
   };
 
-  // email sender — prefill vendor email, allow override
-  const sendEmail = async (po, to) => {
+  // open a signed URL for the saved PDF (download/open)
+  const openSignedPdf = async (po) => {
     try {
-      const vendor = vendorsMap?.[po.vendor_id] || {};
-      const subject = `Purchase Order ${po.code}`;
-      const html = renderPOEmail({ po, vendor });
+      if (!po?.pdf_path) return alert("No PDF saved yet. Click PDF to generate.");
+      const { data, error } = await supabase
+        .storage
+        .from("pdfs")
+        .createSignedUrl(po.pdf_path, 60 * 10);
+      if (error) throw error;
 
-      let attachments;
-      if (po.pdf_path) {
-        const { data, error } = await supabase
-          .storage
-          .from("pdfs")
-          .createSignedUrl(po.pdf_path, 60 * 60);
-        if (!error && data?.signedUrl) {
-          attachments = [{ filename: `${po.code}.pdf`, url: data.signedUrl }];
-        }
-      }
-
-      await sendEmailDoc({ to, subject, html, attachments });
-      alert("Email sent.");
-      setEmailFor(null);
-    } catch (err) {
-      console.error("Email error:", err);
-      alert(err.message || "Failed to send email");
+      const a = document.createElement("a");
+      a.href = data.signedUrl;
+      a.download = `${po.code}.pdf`;
+      a.target = "_blank";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (e) {
+      console.error(e);
+      alert(e.message || "Failed to open PDF");
     }
   };
+
+  // email sender — prefill vendor email, allow override (uses templates)
+  // sendEmail(po, to) — call this from your Confirm modal "Yes"
+const sendEmail = async (po, to) => {
+  try {
+    // 1) Load vendor (so we can prefill/ctx vendor info)
+    const { data: vendor } = await supabase
+      .from("vendors")
+      .select("id,name,email,phone,address")
+      .eq("id", po.vendor_id)
+      .maybeSingle();
+
+    // 2) Load settings (may include custom PO subject/html)
+    const { data: settings } = await supabase
+      .from("settings")
+      .select("business_name,business_email,brand_logo_url,brand_logo_path,email_po_subject,email_po_template_html,currency")
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+
+    // 3) Signed PDF URL (if you stored one)
+    let pdfUrl = "";
+    if (po.pdf_path) {
+      const { data: signed } = await supabase
+        .storage
+        .from("pdfs")
+        .createSignedUrl(po.pdf_path, 60 * 60);
+      if (signed?.signedUrl) pdfUrl = signed.signedUrl;
+    }
+
+    // 4) Load items for context (your listPOItems already exists)
+    const items = await listPOItems(tenantId, po.id);
+
+    // 5) Pick template strings (custom or defaults)
+    const dft     = poDefaults(); // { subject, html }
+    const subjTpl = settings?.email_po_subject || dft.subject;
+    const htmlTpl = settings?.email_po_template_html || dft.html;
+
+    // 6) Build PO context & render
+    const ctx = buildPOContext({ po, vendor, settings, items, pdfUrl });
+    const subject = renderTemplate(subjTpl, ctx);
+    const html    = renderTemplate(htmlTpl, ctx);
+
+    // 7) Optional attachment
+    const attachments = pdfUrl ? [{ filename: `${po.code}.pdf`, url: pdfUrl }] : undefined;
+
+    await sendEmailDoc({ to, subject, html, attachments });
+    alert("Email sent.");
+    setEmailFor(null); // if you keep that modal state
+  } catch (err) {
+    console.error(err);
+    alert(err.message || "Failed to send email");
+  }
+};
 
   return (
     <section className="section">
@@ -227,7 +273,9 @@ export default function PurchaseOrders() {
                 </td>
                 <td>
                   {po.pdf_path ? (
-                    <span className="tiny mono">{po.pdf_path}</span>
+                    <button className="btn" onClick={() => openSignedPdf(po)}>
+                      Download
+                    </button>
                   ) : (
                     <span className="tiny">—</span>
                   )}
@@ -331,7 +379,7 @@ export default function PurchaseOrders() {
         onNo={() => setEmailFor(null)}
       />
 
-      {/* NEW: PDF Preview Modal */}
+      {/* PDF Preview Modal */}
       {pdfPreviewUrl ? (
         <div className="modal" onClick={() => setPdfPreviewUrl("")}>
           <div className="modal-content wide" onClick={(e) => e.stopPropagation()}>
@@ -567,7 +615,6 @@ function LowVendorModal({ tenantId, vendor, items, onClose, onCreate }) {
     const q = {};
     (items || []).forEach((m) => {
       c[m.id] = true; // precheck low items
-      // prefill suggested need:
       const need = Math.max(
         1,
         Number(m.reorder_threshold || 0) -
@@ -755,50 +802,22 @@ function renderPOHtml({ po, vendor, items }) {
       <div><h2 style="margin:0 0 6px 0;">Purchase Order</h2><div class="mono"># ${po.code}</div></div>
       <div style="text-align:right">
         <div style="font-size:14px">${vendor.name || ""}</div>
-        <div style="font-size:12px; color:#555">${vendor.email || ""}</div>
       </div>
     </div>
     <div style="margin:12px 0; height:1px; background:#eee;"></div>
-    <table style="width:100%; border-collapse:collapse; font-size:14px">
-      <thead><tr><th style="text-align:left; padding:6px 4px;">Description</th><th style="text-align:right; padding:6px 4px;">Qty</th><th style="text-align:right; padding:6px 4px;">Unit</th></tr></thead>
+    <table style="width:100%; font-size:14px; border-collapse:collapse;">
+      <thead><tr><th align="left">Description</th><th align="right">Qty</th><th align="right">Unit Cost</th></tr></thead>
       <tbody>
-        ${(items || [])
-          .map(
-            (it) => `
+        ${(items||[]).map(it=>`
           <tr>
-            <td style="border-bottom:1px solid #eee; padding:6px 4px;">${escape(
-              it.description
-            )}</td>
-            <td style="border-bottom:1px solid #eee; padding:6px 4px; text-align:right;">${Number(
-              it.qty || 0
-            )}</td>
-            <td style="border-bottom:1px solid #eee; padding:6px 4px; text-align:right;">${
-              it.unit_cost != null ? "$" + Number(it.unit_cost).toFixed(2) : "—"
-            }</td>
+            <td>${escapeHtml(it.description||'')}</td>
+            <td align="right">${Number(it.qty||0)}</td>
+            <td align="right">${it.unit_cost!=null? '$'+Number(it.unit_cost).toFixed(2) : '—'}</td>
           </tr>
-        `
-          )
-          .join("")}
+        `).join('')}
       </tbody>
     </table>
   </div>`;
 }
 
-function renderPOEmail({ po, vendor }) {
-  return `
-    <div style="font-family:Arial; color:#111">
-      <p>Hello ${escape(vendor.name || "")},</p>
-      <p>Please see Purchase Order <b>${escape(po.code)}</b>.</p>
-      <p>Thank you.</p>
-    </div>
-  `;
-}
-function escape(s) {
-  return String(s || "").replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  }[m]));
-}
+function escapeHtml(s){ return String(s||'').replace(/[&<>"']/g,(m)=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }

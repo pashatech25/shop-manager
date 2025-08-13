@@ -5,28 +5,34 @@ import SalesForm from "../features/forms/SalesForm.jsx";
 import {captureElementToPdf} from "../features/pdf/service.js";
 import { webhookJobCompleted, webhookInvoiceGenerated } from "../features/webhook/api.js";
 
-export default function Jobs(){
-  const {tenantId}=useTenant();
+/* ========================================================================== */
+/*                                MAIN COMPONENT                             */
+/* ========================================================================== */
 
-  const [loading,setLoading]=useState(true);
-  const [error,setError]=useState("");
-  const [active,setActive]=useState([]);
-  const [completed,setCompleted]=useState([]);
-  const [maps,setMaps]=useState({equip:{}, mats:{}, addons:{}, cust:{}});
-  const [editing,setEditing]=useState(null); // null=none, {}=new, row=edit
-  const [viewing,setViewing]=useState(null); // completed job row for modal view
+export default function Jobs(){
+  // ==================== STATE ====================
+  const {tenantId} = useTenant();
+  
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [active, setActive] = useState([]);
+  const [completed, setCompleted] = useState([]);
+  const [maps, setMaps] = useState({equip:{}, mats:{}, addons:{}, cust:{}});
+  const [editing, setEditing] = useState(null); // null=none, {}=new, row=edit
+  const [viewing, setViewing] = useState(null); // completed job row for modal view
 
   // { [completed_job_id]: {id, code} }
-  const [invoiceByCompletedJob,setInvoiceByCompletedJob]=useState({});
+  const [invoiceByCompletedJob, setInvoiceByCompletedJob] = useState({});
 
-  const printRef=useRef(null);
+  const printRef = useRef(null);
 
   // PDF preview modal state
   const [pdfUrl, setPdfUrl] = useState("");
   const [pdfOpen, setPdfOpen] = useState(false);
 
-  // -------- reference maps
-  const loadMaps=async ()=>{
+  // ==================== DATA LOADING ====================
+  
+  const loadMaps = async () => {
     if(!tenantId) return {equip:{}, mats:{}, addons:{}, cust:{}};
     const [eq,ma,ad,cu] = await Promise.all([
       supabase.from('equipments').select('id,name,type').eq('tenant_id', tenantId),
@@ -41,7 +47,7 @@ export default function Jobs(){
     return {equip, mats, addons, cust};
   };
 
-  const loadInvoicesMap = async ()=>{
+  const loadInvoicesMap = async () => {
     if(!tenantId) return {};
     const {data, error} = await supabase
       .from('invoices')
@@ -59,6 +65,33 @@ export default function Jobs(){
     return map;
   };
 
+  const load = async () => {
+    if(!tenantId) return;
+    try{
+      setLoading(true); setError("");
+      const [a,c,m,im]=await Promise.all([
+        supabase.from("jobs").select("*").eq("tenant_id", tenantId).order("created_at",{ascending:false}),
+        supabase.from("completed_jobs").select("*").eq("tenant_id", tenantId).order("completed_at",{ascending:false}),
+        loadMaps(),
+        loadInvoicesMap()
+      ]);
+      if(a.error) throw a.error;
+      if(c.error) throw c.error;
+      setActive(a.data||[]);
+      setCompleted(c.data||[]);
+      setMaps(m);
+      setInvoiceByCompletedJob(im);
+    }catch(ex){
+      setError(ex.message||"Failed to load jobs");
+    }finally{
+      setLoading(false);
+    }
+  };
+
+  useEffect(()=>{ load(); },[tenantId]);
+
+  // ==================== WEBHOOK HELPERS ====================
+  
   // (kept in case you still use it elsewhere)
   const enqueueWebhook = async (event, payload) => {
     try {
@@ -122,33 +155,9 @@ export default function Jobs(){
     };
   };
 
-  const load=async ()=>{
-    if(!tenantId) return;
-    try{
-      setLoading(true); setError("");
-      const [a,c,m,im]=await Promise.all([
-        supabase.from("jobs").select("*").eq("tenant_id", tenantId).order("created_at",{ascending:false}),
-        supabase.from("completed_jobs").select("*").eq("tenant_id", tenantId).order("completed_at",{ascending:false}),
-        loadMaps(),
-        loadInvoicesMap()
-      ]);
-      if(a.error) throw a.error;
-      if(c.error) throw c.error;
-      setActive(a.data||[]);
-      setCompleted(c.data||[]);
-      setMaps(m);
-      setInvoiceByCompletedJob(im);
-    }catch(ex){
-      setError(ex.message||"Failed to load jobs");
-    }finally{
-      setLoading(false);
-    }
-  };
-
-  useEffect(()=>{ load(); },[tenantId]);
-
-  // -------- actions
-  const onPdf = async (row, kind='jobs')=>{
+  // ==================== ACTIONS ====================
+  
+  const onPdf = async (row, kind='jobs') => {
     if(!printRef.current){ alert('Printable element not found'); return; }
     printRef.current.innerHTML = renderJobHtml({row, maps});
     const {url}=await captureElementToPdf({element: printRef.current, tenantId, kind, code:row.code});
@@ -156,14 +165,14 @@ export default function Jobs(){
     setPdfOpen(true);
   };
 
-  const onDeleteActive = async (row)=>{
+  const onDeleteActive = async (row) => {
     if(!confirm('Delete job?')) return;
     const {error}=await supabase.from('jobs').delete().eq('id', row.id).eq('tenant_id', tenantId);
     if(error){ alert(error.message); return; }
     await load();
   };
 
-  const onComplete = async (row)=>{
+  const onComplete = async (row) => {
     if(!confirm('Complete this job, apply inventory & ink deductions?')) return;
     const {error} = await supabase.rpc('complete_job_and_apply_inventory', {
       p_job_id: row.id, p_tenant_id: tenantId
@@ -185,7 +194,7 @@ export default function Jobs(){
   };
 
   // One-time invoice generation with client-side guard + optimistic state
-  const onGenerateInvoice = async (completedRow)=>{
+  const onGenerateInvoice = async (completedRow) => {
     const cjId = completedRow.id;
 
     if (invoiceByCompletedJob[cjId]) {
@@ -253,6 +262,8 @@ export default function Jobs(){
     await load();
   };
 
+  // ==================== RENDER ====================
+  
   return (
     <section className="section">
       <div className="section-header">
@@ -338,6 +349,8 @@ export default function Jobs(){
         </table>
       </div>
 
+      {/* MODALS */}
+      
       {/* View completed job modal */}
       {viewing? (
         <JobViewModal
@@ -367,12 +380,15 @@ export default function Jobs(){
         </div>
       ):null}
 
+      {/* Hidden print element */}
       <div ref={printRef} style={{position:'fixed', left:-9999, top:-9999}}/>
     </section>
   );
 }
 
-/* ============================ Active job card ============================ */
+/* ========================================================================== */
+/*                              ACTIVE JOB CARD                              */
+/* ========================================================================== */
 
 function JobCard({row, maps, onEdit, onPdf, onComplete, onDelete}){
   const sum = useMemo(()=>summarize(row, maps),[row, maps]);
@@ -427,6 +443,10 @@ function JobCard({row, maps, onEdit, onPdf, onComplete, onDelete}){
   );
 }
 
+/* ========================================================================== */
+/*                          INK DOT DISPLAY COMPONENT                        */
+/* ========================================================================== */
+
 function InkDot({color,label}){
   return (
     <span style={{display:'inline-flex', alignItems:'center', gap:6}}>
@@ -439,7 +459,9 @@ function InkDot({color,label}){
   );
 }
 
-/* ============================ Completed job modal ============================ */
+/* ========================================================================== */
+/*                            JOB DETAILS MODAL                              */
+/* ========================================================================== */
 
 function JobViewModal({row, maps, hasInvoice, invCode, onClose, onPdf, onGenerateInvoice}){
   const sum = useMemo(()=>summarize(row, maps),[row, maps]);
@@ -448,47 +470,230 @@ function JobViewModal({row, maps, hasInvoice, invCode, onClose, onPdf, onGenerat
   return (
     <div className="modal" onClick={onClose}>
       <div className="modal-content wide" onClick={(e)=>e.stopPropagation()}>
-        <div className="row">
-          <h3 style={{margin:0}}>Job <span className="tiny mono">#{row.code}</span></h3>
-          <div className="btn-row">
-            <button className="btn" onClick={onPdf}><i className="fa-regular fa-file-pdf"/> PDF</button>
-            {hasInvoice ? (
-              <button className="btn btn-success" disabled title={`Invoice ${invCode} already generated`}>
-                Invoice Generated
-              </button>
-            ) : (
-              <button className="btn btn-secondary" onClick={onGenerateInvoice}>Generate Invoice</button>
+        
+        {/* MODAL HEADER */}
+        <JobModalHeader 
+          jobCode={row.code}
+          hasInvoice={hasInvoice}
+          invCode={invCode}
+          onPdf={onPdf}
+          onGenerateInvoice={onGenerateInvoice}
+          onClose={onClose}
+        />
+        
+        {/* JOB INFO HEADER */}
+        <JobInfoHeader 
+          completed={completed}
+          customerLabel={sum.customerLabel}
+          title={row.title}
+          status={row.status}
+        />
+
+        {/* JOB DETAILS CONTENT */}
+        <div className="modal-body" style={{maxHeight:'60vh', overflowY:'auto', padding:'8px 0'}}>
+          
+          {/* EQUIPMENT SECTION */}
+          <JobDetailSection title="Equipment" icon="🔧">
+            <SectionList title="" lines={sum.eqLines}/>
+            {sum.inkDots.length > 0 && (
+              <InkUsageDisplay inkDots={sum.inkDots} inkTotal={sum.inkTotal} />
             )}
-            <button className="btn" onClick={onClose}>Close</button>
-          </div>
-        </div>
-        <div className="tiny" style={{margin:'6px 0 16px'}}>
-          {completed? completed.toLocaleString() : ''} • {sum.customerLabel}
+          </JobDetailSection>
+
+          {/* MATERIALS SECTION */}
+          <JobDetailSection title="Materials" icon="📦">
+            <SectionList title="" lines={sum.matLines}/>
+          </JobDetailSection>
+
+          {/* LABOR SECTION */}
+          <JobDetailSection title="Labor" icon="👷">
+            <SectionList title="" lines={sum.laborLines}/>
+          </JobDetailSection>
+
+          {/* ADD-ONS SECTION */}
+          <JobDetailSection title="Add-ons" icon="➕">
+            <SectionList title="" lines={sum.addonLines}/>
+          </JobDetailSection>
+
         </div>
 
-        <SectionList title="Equipment" lines={sum.eqLines}/>
-        {sum.inkDots.length? (
-          <div className="tiny" style={{display:'flex', alignItems:'center', gap:8, flexWrap:'wrap', marginTop:8}}>
-            <b>Ink:</b>
-            {sum.inkDots.map((d,i)=><InkDot key={i} color={d.color} label={`${d.key}:${d.val}`}/>)}
-            <span className="tiny">Total {sum.inkTotal}</span>
-          </div>
-        ):null}
-        <SectionList title="Materials" lines={sum.matLines}/>
-        <SectionList title="Labor" lines={sum.laborLines}/>
-        <SectionList title="Add-ons" lines={sum.addonLines}/>
+        {/* FINANCIAL SUMMARY */}
+        <FinancialSummary totals={row.totals} />
+        
+      </div>
+    </div>
+  );
+}
 
-        <div className="card" style={{marginTop:12}}>
-          <div className="grid-3">
-            <div><strong>Cost:</strong><br/>${Number(row.totals?.totalCost??0).toFixed(2)}</div>
-            <div><strong>Charge (pre-tax):</strong><br/>${Number(row.totals?.totalCharge??0).toFixed(2)}</div>
-            <div><strong>Profit:</strong><br/>${Number(row.totals?.profit??0).toFixed(2)} ({Number(row.totals?.profitPct??0).toFixed(1)}%)</div>
+/* ========================================================================== */
+/*                         MODAL SUB-COMPONENTS                              */
+/* ========================================================================== */
+
+function JobModalHeader({jobCode, hasInvoice, invCode, onPdf, onGenerateInvoice, onClose}) {
+  return (
+    <div className="row" style={{borderBottom: '1px solid #eee', paddingBottom: '12px', marginBottom: '16px'}}>
+      <div>
+        <h3 style={{margin:0, fontSize:'24px', fontWeight:'600'}}>
+          Job Details
+        </h3>
+        <div className="tiny mono" style={{color:'#666', marginTop:'4px'}}>
+          #{jobCode}
+        </div>
+      </div>
+      <div className="btn-row">
+        <button className="btn" onClick={onPdf} title="Export to PDF">
+          <i className="fa-regular fa-file-pdf"/> PDF
+        </button>
+        {hasInvoice ? (
+          <button 
+            className="btn btn-success" 
+            disabled 
+            title={`Invoice ${invCode} already generated`}
+          >
+            <i className="fa-solid fa-check"/> Invoice Generated
+          </button>
+        ) : (
+          <button 
+            className="btn btn-secondary" 
+            onClick={onGenerateInvoice}
+            title="Generate invoice for this job"
+          >
+            <i className="fa-solid fa-file-invoice"/> Generate Invoice
+          </button>
+        )}
+        <button className="btn" onClick={onClose} title="Close modal">
+          <i className="fa-solid fa-times"/>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function JobInfoHeader({completed, customerLabel, title, status}) {
+  return (
+    <div className="job-info-header" style={{
+      background: '#f8f9fa', 
+      padding: '12px 16px', 
+      borderRadius: '8px', 
+      marginBottom: '20px',
+      border: '1px solid #e9ecef'
+    }}>
+      <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'8px'}}>
+        <h4 style={{margin:0, fontSize:'18px', color:'#333'}}>{title}</h4>
+        <span className={`badge ${status==='completed'?'completed-status':'active-status'}`}>
+          {status || 'active'}
+        </span>
+      </div>
+      <div style={{display:'flex', gap:'16px', fontSize:'14px', color:'#666'}}>
+        <span>
+          <i className="fa-regular fa-calendar"/> {completed ? completed.toLocaleString() : 'In Progress'}
+        </span>
+        <span>
+          <i className="fa-regular fa-user"/> {customerLabel}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function JobDetailSection({title, icon, children}) {
+  return (
+    <div className="detail-section" style={{marginBottom:'16px'}}>
+      <div style={{
+        display:'flex', 
+        alignItems:'center', 
+        gap:'8px', 
+        marginBottom:'8px',
+        paddingBottom:'6px',
+        borderBottom:'2px solid #f0f0f0'
+      }}>
+        <span style={{fontSize:'18px'}}>{icon}</span>
+        <h4 style={{margin:0, fontSize:'16px', fontWeight:'600', color:'#333'}}>{title}</h4>
+      </div>
+      <div style={{paddingLeft:'18px'}}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function InkUsageDisplay({inkDots, inkTotal}) {
+  return (
+    <div style={{
+      marginTop:'8px', 
+      padding:'8px', 
+      background:'#f8f9fa', 
+      borderRadius:'6px',
+      border:'1px solid #e9ecef'
+    }}>
+      <div style={{
+        display:'flex', 
+        alignItems:'center', 
+        gap:8, 
+        flexWrap:'wrap'
+      }}>
+        <span style={{fontWeight:'600', color:'#333', fontSize:'14px'}}>
+          <i className="fa-solid fa-droplet"/> Ink Usage:
+        </span>
+        {inkDots.map((d,i) => (
+          <InkDot key={i} color={d.color} label={`${d.key}: ${d.val}ml`} />
+        ))}
+        <span style={{
+          fontSize:'14px', 
+          fontWeight:'600', 
+          color:'#495057',
+          marginLeft:'4px'
+        }}>
+          Total: {inkTotal}ml
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function FinancialSummary({totals}) {
+  const cost = Number(totals?.totalCost ?? 0);
+  const charge = Number(totals?.totalCharge ?? 0);
+  const profit = Number(totals?.profit ?? 0);
+  const profitPct = Number(totals?.profitPct ?? 0);
+
+  return (
+    <div style={{
+      marginTop:'20px', 
+      padding:'20px', 
+      background:'linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%)', 
+      borderRadius:'12px',
+      border:'1px solid #dee2e6'
+    }}>
+      <h4 style={{margin:'0 0 16px 0', color:'#333', textAlign:'center'}}>
+        <i className="fa-solid fa-calculator"/> Financial Summary
+      </h4>
+      <div className="grid-3" style={{gap:'20px'}}>
+        <div style={{textAlign:'center', padding:'12px', background:'white', borderRadius:'8px', boxShadow:'0 2px 4px rgba(0,0,0,0.1)'}}>
+          <div style={{fontSize:'12px', color:'#666', marginBottom:'4px'}}>TOTAL COST</div>
+          <div style={{fontSize:'20px', fontWeight:'700', color:'#dc3545'}}>${cost.toFixed(2)}</div>
+        </div>
+        <div style={{textAlign:'center', padding:'12px', background:'white', borderRadius:'8px', boxShadow:'0 2px 4px rgba(0,0,0,0.1)'}}>
+          <div style={{fontSize:'12px', color:'#666', marginBottom:'4px'}}>CHARGE (PRE-TAX)</div>
+          <div style={{fontSize:'20px', fontWeight:'700', color:'#007bff'}}>${charge.toFixed(2)}</div>
+        </div>
+        <div style={{textAlign:'center', padding:'12px', background:'white', borderRadius:'8px', boxShadow:'0 2px 4px rgba(0,0,0,0.1)'}}>
+          <div style={{fontSize:'12px', color:'#666', marginBottom:'4px'}}>PROFIT</div>
+          <div style={{fontSize:'20px', fontWeight:'700', color:'#28a745'}}>
+            ${profit.toFixed(2)}
+          </div>
+          <div style={{fontSize:'14px', color:'#28a745', fontWeight:'600'}}>
+            ({profitPct.toFixed(1)}%)
           </div>
         </div>
       </div>
     </div>
   );
 }
+
+/* ========================================================================== */
+/*                          SECTION LIST COMPONENT                           */
+/* ========================================================================== */
 
 function SectionList({title, lines}){
   return (
@@ -501,7 +706,9 @@ function SectionList({title, lines}){
   );
 }
 
-/* ============================ summarize + PDF ============================ */
+/* ========================================================================== */
+/*                          UTILITY & HELPER FUNCTIONS                       */
+/* ========================================================================== */
 
 function summarize(row, maps){
   const items=row.items||{};
@@ -581,7 +788,12 @@ function summarize(row, maps){
     laborLines, laborLabel
   };
 }
+
 function fmt$(n){ const v=Number(n||0); return `$${v.toFixed(2)}`; }
+
+/* ========================================================================== */
+/*                             PDF GENERATION                                */
+/* ========================================================================== */
 
 function renderJobHtml({row, maps}){
   const sum=summarize(row, maps);
@@ -634,4 +846,5 @@ function renderJobHtml({row, maps}){
   </div>
   `;
 }
+
 function esc(s){ return String(s||'').replace(/[&<>"']/g,(m)=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
