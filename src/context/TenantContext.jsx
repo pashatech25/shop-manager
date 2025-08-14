@@ -1,67 +1,101 @@
 import React, {createContext, useContext, useEffect, useMemo, useState} from "react";
-import {supabase} from "../lib/supabaseClient";
-import {defaultTenantId as ENV_DEFAULT_TENANT} from "../lib/supabaseClient";
+import {supabase} from "../lib/superbase.js"; // keep your existing import path
 
-/**
- * Resolves tenantId for the current user:
- * 1) If logged in, fetch `profiles.tenant_id` for auth.uid()
- * 2) Else, fall back to VITE_DEFAULT_TENANT_ID (for local testing)
- */
-const TenantCtx = createContext({tenantId:null, setTenantId:()=>{}});
+const TenantCtx = createContext({ tenantId: null, ready: false });
 
-export function TenantProvider({children}){
-  const [tenantId,setTenantId] = useState(null);
-  const [loading,setLoading] = useState(true);
-  const [error,setError] = useState("");
+export function TenantProvider({children}) {
+  const [tenantId, setTenantId] = useState(null);
+  const [ready, setReady] = useState(false);
 
-  useEffect(()=>{
-    let cancelled=false;
-    const run = async ()=>{
-      setLoading(true);
-      setError("");
+  useEffect(() => {
+    let cancelled = false;
 
-      try{
-        // get current session (if any)
-        const {data:{session}} = await supabase.auth.getSession();
-        const uid = session?.user?.id || null;
+    async function resolveTenant() {
+      setReady(false);
 
-        if(uid){
-          // fetch profile → tenant_id
-          const {data, error} = await supabase
+      // 1) Get current session
+      const { data: { session } } = await supabase.auth.getSession();
+      const uid = session?.user?.id || null;
+      const email = session?.user?.email || null;
+
+      // 2) Local dev override (kept for your flow)
+      const localDefault = import.meta.env.VITE_DEFAULT_TENANT_ID;
+      if (!uid && localDefault) {
+        if (!cancelled) {
+          setTenantId(localDefault);
+          setReady(true);
+        }
+        return;
+      }
+
+      if (!uid) {
+        // not logged in yet
+        if (!cancelled) {
+          setTenantId(null);
+          setReady(true);
+        }
+        return;
+      }
+
+      try {
+        // 3) Ask the DB to ensure profile+tenant, and give us the tenant_id
+        const { data, error } = await supabase.rpc("ensure_profile_and_tenant", {
+          _user_id: uid,
+          _email: email
+        });
+
+        if (error) {
+          console.warn("ensure_profile_and_tenant error:", error);
+          // last resort: try to read profile.tenant_id directly
+          const { data: prof, error: e2 } = await supabase
             .from("profiles")
             .select("tenant_id")
             .eq("user_id", uid)
-            .limit(1)
-            .maybeSingle();
-          if(error) throw error;
-          const t = data?.tenant_id || null;
-          if(!cancelled) setTenantId(t);
-        }else{
-          // no session: fall back to .env default (handy for dev)
-          if(!cancelled) setTenantId(ENV_DEFAULT_TENANT || null);
+            .single();
+          if (e2) throw e2;
+          if (!cancelled) {
+            setTenantId(prof?.tenant_id ?? null);
+            setReady(true);
+          }
+          return;
         }
-      }catch(ex){
-        if(!cancelled){
-          setError(ex.message||"Failed to resolve tenant");
-          setTenantId(ENV_DEFAULT_TENANT || null);
+
+        if (!cancelled) {
+          setTenantId(data ?? null);
+          setReady(true);
         }
-      }finally{
-        if(!cancelled) setLoading(false);
+      } catch (ex) {
+        console.error("TenantContext resolve failure:", ex);
+        if (!cancelled) {
+          setTenantId(null);
+          setReady(true);
+        }
       }
-    };
+    }
 
-    run();
+    resolveTenant();
 
-    // also react to auth changes
-    const {data: sub} = supabase.auth.onAuthStateChange((_event)=>{
-      run();
+    // 4) Update when auth state changes (switch user, logout, etc.)
+    const { data: sub } = supabase.auth.onAuthStateChange((_event) => {
+      // Re-run the resolution flow on any auth change
+      resolveTenant();
     });
 
-    return ()=>{ cancelled=true; sub?.subscription?.unsubscribe?.(); };
-  },[]);
+    return () => {
+      cancelled = true;
+      sub?.subscription?.unsubscribe?.();
+    };
+  }, []);
 
-  const value = useMemo(()=>({tenantId, setTenantId, loading, error}), [tenantId, loading, error]);
-  return <TenantCtx.Provider value={value}>{children}</TenantCtx.Provider>;
+  const value = useMemo(() => ({ tenantId, ready }), [tenantId, ready]);
+
+  return (
+    <TenantCtx.Provider value={value}>
+      {children}
+    </TenantCtx.Provider>
+  );
 }
 
-export function useTenant(){ return useContext(TenantCtx); }
+export function useTenant() {
+  return useContext(TenantCtx);
+}

@@ -73,20 +73,22 @@ export default function Shop(){
   };
 
   return (
-    <section id="shop-section">
+    <section id="shop-section" className="shop-container">
       <div className="d-flex align-items-center justify-content-between">
-        <h2 className="m-0">Shop â€" Equipment</h2>
-        <button className="btn btn-primary new-button" onClick={onCreate}>New Equipment</button>
+        <h2 className="m-0 shop-title">Shop — Equipment</h2>
+        <button className="btn btn-primary new-equipment-btn" onClick={onCreate}>
+          New Equipment
+        </button>
       </div>
 
       {!tenantId && (
-        <div className="alert alert-warning mt-3">
+        <div className="alert alert-warning mt-3 shop-alert">
           No tenant context. Ensure your profile is linked to a tenant or set <code>VITE_DEFAULT_TENANT_ID</code> for local testing.
         </div>
       )}
 
       {open && (
-        <div className="mt-3">
+        <div className="mt-3 equipment-form-container">
           <EquipmentForm
             tenantId={tenantId}
             initial={editing}
@@ -96,59 +98,67 @@ export default function Shop(){
         </div>
       )}
 
-      {loading && <div className="shadow-box mt-3">Loading equipmentsâ€¦</div>}
-      {error && <div className="alert alert-danger mt-3">{error}</div>}
+      {loading && <div className="shadow-box mt-3 loading-box">Loading equipments…</div>}
+      
+      {error && <div className="alert alert-danger mt-3 shop-alert error-alert">{error}</div>}
 
       <div id="shop-list" className="mt-3">
         {(!loading && items.length > 0) && (
-          <div className="table-responsive">
-            <table className="table table-striped table-bordered">
-              <thead className="table-dark">
+          <div className="table-responsive equipment-table-container">
+            <table className="table table-striped table-bordered equipment-table">
+              <thead className="table-dark equipment-table-header">
                 <tr>
-                  <th>Equipment Name & Type</th>
-                  <th>Description</th>
-                  <th>Details</th>
-                  <th>Actions</th>
+                  <th className="equipment-table-th">Equipment Name & Type</th>
+                  <th className="equipment-table-th">Description</th>
+                  <th className="equipment-table-th">Details</th>
+                  <th className="equipment-table-th">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {items.map((eq)=>(
-                  <tr key={eq.id}>
-                    <td>
-                      <h5 className="mb-1">{eq.name}</h5>
-                      <small className="text-muted">({eq.type})</small>
+                  <tr key={eq.id} className="equipment-row">
+                    <td className="equipment-table-td">
+                      <h5 className="mb-1 equipment-name">{eq.name}</h5>
+                      <small className="text-muted equipment-type">({eq.type})</small>
                     </td>
-                    <td>
-                      {eq.description && <div className="text-muted small">{eq.description}</div>}
+                    <td className="equipment-table-td">
+                      {eq.description && <div className="text-muted small equipment-description">{eq.description}</div>}
                     </td>
-                    <td>
+                    <td className="equipment-table-td">
                       {(eq.type==="UV Printer" || eq.type==="Sublimation Printer") && (
                         <div className="small">
-                          <strong>Ink threshold:</strong> {eq.threshold_pct ?? 20}%
-                          <div className="d-flex gap-2 mt-1 flex-wrap">
+                          <strong className="equipment-detail-label">Ink threshold:</strong> {eq.threshold_pct ?? 20}%
+                          <div className="d-flex gap-2 mt-1 flex-wrap badge-container">
                             {["c","m","y","k","gloss","white","soft_white"].map((c)=>{
                               const key = c==="soft_white"?"ink_level_soft_white":(c==="gloss"?"ink_level_gloss":`ink_level_${c}`);
                               const val = eq[key];
                               if(val==null) return null;
                               const label = c==="soft_white"?"Soft White":(c==="gloss"?"Gloss":c.toUpperCase());
-                              return <span key={c} className={`badge ${val<=eq.threshold_pct?"bg-danger":"bg-secondary"}`}>{label}: {val}%</span>;
+                              return <span 
+                                key={c} 
+                                className={`badge equipment-badge ${val<=eq.threshold_pct?"bg-danger":"bg-secondary"}`}
+                              >{label}: {val}%</span>;
                             })}
                             {eq.use_soft_white!=null && (
-                              <span className="badge bg-info">{eq.use_soft_white ? "Using Soft White" : "Using White"}</span>
+                              <span className="badge equipment-badge bg-info">{eq.use_soft_white ? "Using Soft White" : "Using White"}</span>
                             )}
                           </div>
                         </div>
                       )}
                       {lasers.includes(eq.type) && (
                         <div className="small">
-                          <strong>Laser details:</strong> Power & brand are captured in description for now.
+                          <strong className="equipment-detail-label">Laser details:</strong> Power & brand are captured in description for now.
                         </div>
                       )}
                     </td>
-                    <td>
-                      <div className="d-flex gap-2">
-                        <button className="btn btn-sm btn-outline-primary" onClick={()=>onEdit(eq)}>Edit</button>
-                        <button className="btn btn-sm btn-outline-danger" onClick={()=>remove(eq.id)}>Delete</button>
+                    <td className="equipment-table-td">
+                      <div className="d-flex gap-2 action-buttons">
+                        <button className="btn btn-sm btn-outline-primary edit-btn" onClick={()=>onEdit(eq)}>
+                          Edit
+                        </button>
+                        <button className="btn btn-sm btn-outline-danger delete-btn" onClick={()=>remove(eq.id)}>
+                          Delete
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -158,7 +168,7 @@ export default function Shop(){
           </div>
         )}
         {(!loading && items.length===0 && tenantId) && (
-          <div className="shadow-box">No equipment yet. Click â€œNew Equipmentâ€.</div>
+          <div className="shadow-box empty-state">No equipment yet. Click "New Equipment".</div>
         )}
       </div>
     </section>

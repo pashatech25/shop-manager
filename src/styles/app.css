@@ -472,3 +472,255 @@ body.sidebar-collapsed { padding-left: 60px; }
           transform: rotate(180deg);
         }
 
+/* Apple-Style Shop Equipment Styles - Add to your app.css */
+
+/* Container */
+.shop-container {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+/* Title */
+.shop-title {
+  font-size: 2rem;
+  font-weight: 600;
+  color: #1d1d1f;
+  margin-bottom: 0;
+}
+
+/* New Equipment Button */
+.new-equipment-btn {
+  background: #007aff !important;
+  border: none !important;
+  border-radius: 8px;
+  padding: 10px 20px;
+  font-weight: 500;
+  font-size: 14px;
+  color: white;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(0, 122, 255, 0.25);
+}
+
+.new-equipment-btn:hover {
+  background: #0056b3 !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 122, 255, 0.35);
+}
+
+/* Alert Styles */
+.shop-alert {
+  border-radius: 8px;
+  border: none;
+  font-weight: 500;
+}
+
+.shop-alert.alert-warning {
+  background: #fff8e1;
+  color: #8b6914;
+}
+
+.error-alert {
+  background: #ffebee;
+  color: #c62828;
+}
+
+/* Equipment Form Container */
+.equipment-form-container {
+  background: white;
+  border-radius: 12px;
+  padding: 24px;
+  margin: 20px 0;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  border: 1px solid #e5e5e7;
+}
+
+/* Loading Box */
+.loading-box,
+.empty-state {
+  background: white;
+  border-radius: 12px;
+  padding: 40px 20px;
+  text-align: center;
+  color: #86868b;
+  font-weight: 500;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  border: 1px solid #e5e5e7;
+}
+
+/* Table Container */
+.equipment-table-container {
+  background: white;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  border: 1px solid #e5e5e7;
+  margin-top: 20px;
+}
+
+/* Table */
+.equipment-table {
+  margin: 0;
+  border: none;
+}
+
+/* Table Header */
+.equipment-table-header {
+  background: #f5f5f7 !important;
+  border: none;
+}
+
+.equipment-table-th {
+  background: #f5f5f7 !important;
+  border: none !important;
+  border-bottom: 1px solid #d2d2d7 !important;
+  font-weight: 600;
+  color: #1d1d1f;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 16px 20px;
+}
+
+/* Table Rows */
+.equipment-row {
+  border: none;
+  border-bottom: 1px solid #f0f0f0;
+  transition: background-color 0.2s ease;
+}
+
+.equipment-row:hover {
+  background-color: #fafafa;
+}
+
+.equipment-row:last-child {
+  border-bottom: none;
+}
+
+/* Table Cells */
+.equipment-table-td {
+  border: none !important;
+  padding: 20px;
+  vertical-align: middle;
+}
+
+/* Equipment Name */
+.equipment-name {
+  font-weight: 600;
+  color: #1d1d1f;
+  margin-bottom: 4px;
+  font-size: 16px;
+}
+
+/* Equipment Type */
+.equipment-type {
+  color: #86868b !important;
+  font-size: 14px;
+}
+
+/* Equipment Description */
+.equipment-description {
+  color: #6e6e73 !important;
+  line-height: 1.4;
+}
+
+/* Detail Labels */
+.equipment-detail-label {
+  color: #1d1d1f;
+  font-weight: 600;
+}
+
+/* Badge Container */
+.badge-container {
+  gap: 6px !important;
+  margin-top: 8px !important;
+}
+
+/* Badges */
+.equipment-badge {
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.equipment-badge.bg-danger {
+  background: #ff3b30 !important;
+}
+
+.equipment-badge.bg-secondary {
+  background: #8e8e93 !important;
+}
+
+.equipment-badge.bg-info {
+  background: #007aff !important;
+}
+
+/* Action Buttons */
+.action-buttons {
+  gap: 8px !important;
+}
+
+.edit-btn,
+.delete-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.edit-btn {
+  border-color: #007aff;
+  color: #007aff;
+  background: transparent;
+}
+
+.edit-btn:hover {
+  background: #007aff !important;
+  border-color: #007aff !important;
+  color: white !important;
+  transform: translateY(-1px);
+}
+
+.delete-btn {
+  border-color: #ff3b30;
+  color: #ff3b30;
+  background: transparent;
+}
+
+.delete-btn:hover {
+  background: #ff3b30 !important;
+  border-color: #ff3b30 !important;
+  color: white !important;
+  transform: translateY(-1px);
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .equipment-table-container {
+    border-radius: 8px;
+  }
+  
+  .equipment-table-td {
+    padding: 16px 12px;
+  }
+  
+  .equipment-table-th {
+    padding: 12px;
+    font-size: 12px;
+  }
+  
+  .action-buttons {
+    flex-direction: column;
+    gap: 4px !important;
+  }
+  
+  .edit-btn,
+  .delete-btn {
+    width: 100%;
+  }
+}

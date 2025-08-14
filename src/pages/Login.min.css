@@ -1,0 +1,145 @@
+/* Minimal Apple app skin — light/dark via prefers-color-scheme */
+:root{
+  --bg: #f5f5f7;           /* Apple app light gray */
+  --surface: #ffffff;      /* Card */
+  --text: #1d1d1f;         /* Label text */
+  --muted: #6e6e73;        /* Secondary text */
+  --line: rgba(0,0,0,0.08);/* Hairline */
+  --ring: rgba(0,122,255,0.28);
+  --accent: #007aff;       /* iOS/macOS blue */
+  --radius: 14px;
+  --shadow: 0 6px 20px rgba(0,0,0,0.06);
+}
+
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg: #000000;
+    --surface: #1c1c1e;
+    --text: #f5f5f7;
+    --muted: #a1a1a6;
+    --line: rgba(255,255,255,0.10);
+    --ring: rgba(10,132,255,0.34);
+    --shadow: 0 8px 28px rgba(0,0,0,0.5);
+  }
+}
+
+.login-minimal{
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+  padding: 24px;
+}
+
+/* Card container: targets your first child block (section/main/div) */
+.login-minimal > *:first-child{
+  width: 100%;
+  max-width: 420px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 24px;
+}
+
+/* Headings & help text (keeps your existing <h1>, <p>, etc.) */
+.login-minimal h1{
+  margin: 0 0 4px 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.login-minimal p,
+.login-minimal small,
+.login-minimal .subtitle{
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Generic form layout — works with any existing labels/inputs/buttons */
+.login-minimal form{
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.login-minimal label{
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* Inputs */
+.login-minimal input[type="email"],
+.login-minimal input[type="password"],
+.login-minimal input[type="text"]{
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  transition: box-shadow .15s ease, border-color .15s ease, transform .06s ease;
+}
+.login-minimal input::placeholder{ color: color-mix(in oklab, var(--muted) 85%, transparent); }
+.login-minimal input:focus{
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px var(--ring);
+  transform: translateY(-1px);
+}
+
+/* Primary button — style your existing submit button */
+.login-minimal button[type="submit"],
+.login-minimal .primary,
+.login-minimal button.primary{
+  appearance: none;
+  width: 100%;
+  padding: 12px 14px;
+  border: none;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 14px;
+  color: #fff;
+  background: var(--accent);
+  cursor: pointer;
+  transition: transform .06s ease, filter .2s ease, opacity .2s ease;
+}
+.login-minimal button[type="submit"]:hover,
+.login-minimal .primary:hover,
+.login-minimal button.primary:hover{
+  transform: translateY(-1px);
+}
+.login-minimal button[type="submit"]:disabled{
+  opacity: .7; cursor: progress;
+}
+
+/* Secondary text links (e.g., “Forgot password”) */
+.login-minimal a{
+  color: var(--accent); text-decoration: none;
+}
+.login-minimal a:hover{ text-decoration: underline; }
+
+/* Notices (success/error) — map to your existing message containers */
+.login-minimal .notice,
+.login-minimal .error,
+.login-minimal .success{
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  font-size: 13px;
+}
+.login-minimal .success{ border-color: color-mix(in oklab, var(--accent) 40%, var(--line)); }
+.login-minimal .error{ border-color: color-mix(in oklab, #ff3b30 55%, var(--line)); }
+
+/* Subtle divider utility if you have sections */
+.login-minimal .divider{
+  height: 1px; background: var(--line); margin: 8px 0;
+}
+
+/* Small footer */
+.login-minimal footer{ margin-top: 10px; color: var(--muted); font-size: 12px; text-align: center; }
