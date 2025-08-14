@@ -1,5 +1,6 @@
 import React, {useState} from "react";
 import {supabase} from "../lib/supabaseClient";
+import "./Login.css";
 
 export default function Login(){
   const [email,setEmail] = useState("");
@@ -28,28 +29,41 @@ export default function Login(){
   };
 
   return (
-    <div className="container" style={{maxWidth:480, margin:"40px auto"}}>
-      <h2 className="mb-3">Sign in</h2>
-      <div className="btn-group mb-3" role="group">
-        <button className={`btn btn-${mode==="password"?"primary":"outline-primary"}`} onClick={()=>setMode("password")}>Password</button>
-        <button className={`btn btn-${mode==="magic"?"primary":"outline-primary"}`} onClick={()=>setMode("magic")}>Magic Link</button>
-      </div>
+    <div className="login-shell">
+      <div className="login-card">
+        <div className="login-brand">
+          <div className="brand-dot" />
+          <span className="brand-name">Shop Manager</span>
+        </div>
 
-      <form onSubmit={onSubmit} className="form-card">
-        <label className="form-label">Email</label>
-        <input type="email" value={email} onChange={(e)=>setEmail(e.target.value)} required />
-        {mode==="password" && (
-          <>
-            <label className="form-label">Password</label>
-            <input type="password" value={password} onChange={(e)=>setPassword(e.target.value)} required />
-          </>
-        )}
-        <button className="btn btn-primary mt-3" disabled={loading}>
-          {loading ? "Working…" : (mode==="magic" ? "Send Magic Link" : "Sign In")}
-        </button>
-        {msg && <div className="alert alert-success mt-3">{msg}</div>}
-        {err && <div className="alert alert-danger mt-3">{err}</div>}
-      </form>
+        <h2 className="login-title">Sign in</h2>
+
+        <div className="segmented mb-3" role="tablist" aria-label="Sign-in method">
+          <button className={`segmented-btn ${mode==="password"?"active":""}`} onClick={()=>setMode("password")} type="button">Password</button>
+          <button className={`segmented-btn ${mode==="magic"?"active":""}`} onClick={()=>setMode("magic")} type="button">Magic Link</button>
+        </div>
+
+        <form onSubmit={onSubmit} className="form-card">
+          <label className="form-label">Email</label>
+          <input className="input" type="email" value={email} onChange={(e)=>setEmail(e.target.value)} required />
+
+          {mode==="password" && (
+            <>
+              <label className="form-label">Password</label>
+              <input className="input" type="password" value={password} onChange={(e)=>setPassword(e.target.value)} required />
+            </>
+          )}
+
+          <button className="primary-btn mt-3" disabled={loading}>
+            {loading ? "Working…" : (mode==="magic" ? "Send Magic Link" : "Sign In")}
+          </button>
+
+          {msg && <div className="alert success mt-3" role="status">{msg}</div>}
+          {err && <div className="alert danger mt-3" role="alert">{err}</div>}
+        </form>
+
+        <p className="legal">By continuing, you agree to the Terms & Privacy Policy.</p>
+      </div>
     </div>
   );
 }
