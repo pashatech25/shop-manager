@@ -9,7 +9,7 @@ import {useTenant} from '../context/TenantContext.jsx';
 import {listTypes, addType, deleteType} from '../features/types/api.js';
 import BrandingUpload from '../features/settings/BrandingUpload.jsx';
 
-// NEW: drag-and-drop designer
+// NEW: drag-and-drop designer you already installed
 import TemplateDesigner from '../features/email/TemplateDesigner.jsx';
 
 // templates
@@ -84,7 +84,16 @@ export default function Settings(){
   const {tenantId}=useTenant();
   const [loading,setLoading]=useState(true);
   const [row,setRow]=useState(null);
-  const [activeTab, setActiveTab] = useState('branding');
+
+  // ---- NEW: Profile state ----
+  const [profileLoading, setProfileLoading] = useState(true);
+  const [profileName, setProfileName] = useState('');
+  const [profileEmail, setProfileEmail] = useState(''); // read-only from auth
+  const [pw1, setPw1] = useState('');
+  const [pw2, setPw2] = useState('');
+  const [userId, setUserId] = useState(null);
+
+  const [activeTab, setActiveTab] = useState('profile');
 
   // NEW: modal controls for designer
   const [designerOpen, setDesignerOpen] = useState(false);
@@ -152,6 +161,13 @@ export default function Settings(){
       if(!tenantId) return;
       setLoading(true);
       try{
+        // ---- NEW: load current auth user once ----
+        const { data: userResp } = await supabase.auth.getUser();
+        const user = userResp?.user || null;
+        setUserId(user?.id || null);
+        setProfileEmail(user?.email || '');
+
+        // Load settings + types
         const [{data:settings}, vtypes, mtypes] = await Promise.all([
           supabase.from('settings').select('*').eq('tenant_id', tenantId).maybeSingle(),
           listTypes(tenantId,'vendor'),
@@ -223,9 +239,23 @@ export default function Settings(){
 
         setVendorTypes(vtypes||[]);
         setMaterialTypes(mtypes||[]);
+
+        // ---- NEW: load profile row for this user within tenant ----
+        setProfileLoading(true);
+        if (user?.id) {
+          const { data: prof, error: pErr } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('tenant_id', tenantId)
+            .eq('user_id', user.id)
+            .maybeSingle();
+          if (pErr) console.warn('profile load error', pErr);
+          setProfileName(prof?.name || ''); // <— change to prof?.full_name if your column is full_name
+        }
       }catch(ex){
         console.error(ex);
       }finally{
+        setProfileLoading(false);
         setLoading(false);
       }
     };
@@ -261,6 +291,42 @@ export default function Settings(){
     if(error){ toast.error(error.message); return; }
     toast.success('Email templates saved');
   });
+
+  // ---- NEW: Profile save handlers ----
+  const saveProfile = async ()=>{
+    try{
+      if (!tenantId || !userId) return;
+      const payload = {
+        tenant_id: tenantId,
+        user_id: userId,
+        name: profileName || null, // change to full_name if your schema uses that
+        updated_at: new Date().toISOString()
+      };
+      // upsert on (tenant_id, user_id)
+      const { error } = await supabase
+        .from('profiles')
+        .upsert(payload, { onConflict: 'tenant_id,user_id' });
+      if (error) throw error;
+      toast.success('Profile saved');
+    }catch(e){
+      console.error(e);
+      toast.error(e.message || 'Failed to save profile');
+    }
+  };
+
+  const changePassword = async ()=>{
+    try{
+      if (!pw1) { toast.info('Enter a new password'); return; }
+      if (pw1 !== pw2) { toast.error('Passwords do not match'); return; }
+      const { error } = await supabase.auth.updateUser({ password: pw1 });
+      if (error) throw error;
+      setPw1(''); setPw2('');
+      toast.success('Password updated');
+    }catch(e){
+      console.error(e);
+      toast.error(e.message || 'Failed to change password');
+    }
+  };
 
   // Types helpers
   const addVendorType=async ()=>{
@@ -410,8 +476,9 @@ export default function Settings(){
     }
   };
 
-  // Tab configuration (kept your styling)
+  // Tab configuration — ADDED 'profile' first. Kept your styling.
   const tabs = [
+    { id: 'profile',  label: 'Profile' },
     { id: 'branding', label: 'Branding' },
     { id: 'numbering', label: 'Numbering' },
     { id: 'types', label: 'Custom Types' },
@@ -521,6 +588,56 @@ export default function Settings(){
           </button>
         ))}
       </div>
+
+      {/* ========== NEW: Profile tab ========== */}
+      {activeTab === 'profile' && (
+        <div className="card">
+          <h3>Profile</h3>
+
+          {profileLoading ? (
+            <div className="tiny">Loading profile…</div>
+          ) : (
+            <>
+              <div className="grid-2" style={{marginTop:8}}>
+                <div className="group">
+                  <label>Email (read-only)</label>
+                  <input value={profileEmail} readOnly />
+                </div>
+
+                <div className="group">
+                  <label>Display Name</label>
+                  <input
+                    placeholder="Your name"
+                    value={profileName}
+                    onChange={(e)=>setProfileName(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="btn-row" style={{justifyContent:'flex-start', marginTop:8}}>
+                <button className="btn btn-primary" onClick={saveProfile}>Save Profile</button>
+              </div>
+
+              <div style={{marginTop:18, height:1, background:'#eee'}}/>
+
+              <h4 style={{marginTop:18}}>Change Password</h4>
+              <div className="grid-2" style={{marginTop:8}}>
+                <div className="group">
+                  <label>New Password</label>
+                  <input type="password" value={pw1} onChange={(e)=>setPw1(e.target.value)} />
+                </div>
+                <div className="group">
+                  <label>Confirm New Password</label>
+                  <input type="password" value={pw2} onChange={(e)=>setPw2(e.target.value)} />
+                </div>
+              </div>
+              <div className="btn-row" style={{justifyContent:'flex-start', marginTop:8}}>
+                <button className="btn" onClick={changePassword}>Update Password</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Branding */}
       {activeTab === 'branding' && (
