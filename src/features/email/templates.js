@@ -1,8 +1,9 @@
 // src/features/email/templates.js
+import { supabase } from "../../lib/superbase.js";
 
 /**
  * Tiny mustache-style renderer:
- * - Supports nested keys: {{invoice.code}}, {{business.name}}
+ * - Supports nested keys: {{invoice.code}}, {{business.name}}, {{assets.logo_url}}
  * - Supports flat aliases we expose below: {{invoice_code}}, {{business_name}}, etc.
  */
 export function renderTemplate(tpl, ctx) {
@@ -18,6 +19,43 @@ export function renderTemplate(tpl, ctx) {
   });
 }
 
+/* -------------------------------------------------------
+   Helpers: money/date + logo resolution from Settings
+-------------------------------------------------------- */
+
+function toMoney(n) {
+  const num = Number(n || 0);
+  return `$${num.toFixed(2)}`;
+}
+
+function fmtDate(iso) {
+  try {
+    return iso ? new Date(iso).toLocaleDateString() : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Prefer the uploaded logo (branding bucket) if settings.brand_logo_path exists.
+ * Falls back to settings.brand_logo_url (manual URL).
+ * Returns { url, display } where display is 'inline-block' or 'none'
+ */
+function resolveBrandLogo(settings) {
+  let url = "";
+  if (settings?.brand_logo_path) {
+    const { data } = supabase.storage
+      .from("branding")
+      .getPublicUrl(settings.brand_logo_path);
+    url = data?.publicUrl || "";
+  }
+  if (!url && settings?.brand_logo_url) {
+    url = settings.brand_logo_url;
+  }
+  const display = url ? "inline-block" : "none";
+  return { url, display };
+}
+
 /* -------------------- INVOICE -------------------- */
 
 export function invoiceDefaults() {
@@ -28,7 +66,7 @@ export function invoiceDefaults() {
       <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f6f7f9;padding:24px;">
         <div style="max-width:640px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 6px 18px rgba(0,0,0,.06);overflow:hidden;">
           <div style="padding:20px;border-bottom:1px solid #eee;display:flex;gap:12px;align-items:center;">
-            <img src="{{logo_url}}" alt="" style="height:32px;display:{{logo_url_display}}"/>
+            <img src="{{assets.logo_url}}" alt="" style="height:32px;display:{{assets.logo_url_display}}"/>
             <div style="font-weight:700;font-size:18px">{{business.name}}</div>
           </div>
           <div style="padding:20px">
@@ -62,24 +100,32 @@ export function invoiceDefaults() {
 }
 
 /**
- * Build a context object for invoices with both nested AND flat aliases.
+ * Build a context object for invoices with nested + flat aliases.
  * Pass the exact invoice row, customer object, and settings row you already fetch.
  * Also pass an optional signed PDF url as pdfUrl if you have it.
  */
 export function buildInvoiceContext({ invoice, customer, settings, pdfUrl }) {
   const money = toMoney;
+  const logo = resolveBrandLogo(settings);
 
   const nested = {
     business: {
       name: settings?.business_name || "",
       email: settings?.business_email || ""
     },
-    logo_url: settings?.brand_logo_url || "",
-    logo_url_display: settings?.brand_logo_url ? "inline-block" : "none",
+    // Make uploaded logo available to both legacy & designer templates
+    assets: {
+      logo_url: logo.url,
+      logo_url_display: logo.display
+    },
+    logo_url: logo.url,
+    logo_url_display: logo.display,
+
     date: fmtDate(invoice?.created_at),
     invoice: { code: invoice?.code, created_at: invoice?.created_at },
     customer: { name: customer?.name || "", email: customer?.email || "" },
-    // Totals (we compute from invoice.totals when present)
+
+    // Totals (compute from invoice.totals when present)
     subtotal: money(invoice?.totals?.totalChargePreTax ?? invoice?.totals?.subtotal ?? invoice?.totals?.totalCharge ?? 0),
     tax:      money(invoice?.totals?.tax ?? 0),
     discount: money(resolveDiscountAmount(invoice)),
@@ -88,10 +134,11 @@ export function buildInvoiceContext({ invoice, customer, settings, pdfUrl }) {
     pdf_url: pdfUrl || ""
   };
 
-  // Flat aliases for backward compatibility (old templates)
+  // Flat aliases for backward compatibility
   const flatAliases = {
     business_name: nested.business.name,
     business_email: nested.business.email,
+    // legacy keys
     logo_url: nested.logo_url,
     logo_url_display: nested.logo_url_display,
     date: nested.date,
@@ -118,7 +165,7 @@ export function poDefaults() {
       <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f6f7f9;padding:24px;">
         <div style="max-width:640px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 6px 18px rgba(0,0,0,.06)">
           <div style="padding:20px;border-bottom:1px solid #eee;display:flex;gap:12px;align-items:center;">
-            <img src="{{logo_url}}" alt="" style="height:32px;display:{{logo_url_display}}"/>
+            <img src="{{assets.logo_url}}" alt="" style="height:32px;display:{{assets.logo_url_display}}"/>
             <div style="font-weight:700;font-size:18px">{{business.name}}</div>
           </div>
 
@@ -152,13 +199,20 @@ export function poDefaults() {
  * itemsCount is optional (number). pdfUrl optional.
  */
 export function buildPOContext({ po, vendor, settings, itemsCount, pdfUrl }) {
+  const logo = resolveBrandLogo(settings);
+
   const nested = {
     business: {
       name: settings?.business_name || "",
       email: settings?.business_email || ""
     },
-    logo_url: settings?.brand_logo_url || "",
-    logo_url_display: settings?.brand_logo_url ? "inline-block" : "none",
+    assets: {
+      logo_url: logo.url,
+      logo_url_display: logo.display
+    },
+    logo_url: logo.url,
+    logo_url_display: logo.display,
+
     date: fmtDate(po?.created_at),
     po: { code: po?.code, created_at: po?.created_at },
     vendor: { name: vendor?.name || "", email: vendor?.email || "" },
@@ -182,20 +236,7 @@ export function buildPOContext({ po, vendor, settings, itemsCount, pdfUrl }) {
   return { ...nested, ...flatAliases };
 }
 
-/* -------------------- helpers -------------------- */
-
-function toMoney(n) {
-  const num = Number(n || 0);
-  return `$${num.toFixed(2)}`;
-}
-
-function fmtDate(iso) {
-  try {
-    return iso ? new Date(iso).toLocaleDateString() : "";
-  } catch {
-    return "";
-  }
-}
+/* -------------------- discount/deposit helpers -------------------- */
 
 function resolveDiscountAmount(invoice) {
   // Prefer totals.discount if present; otherwise compute from edit fields
