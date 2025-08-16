@@ -35,7 +35,6 @@ function computeInvoiceGrand(row, taxRatePct){
   const dt = (row?.discount_type || "").toLowerCase(); // 'percent' | 'amount' | ''
   const dv = num(row?.discount_value, 0);
   const discount = dt === "percent" ? preTax * (dv/100) : (dt === "amount" ? dv : 0);
-  // assume tax applies; remove or wire to a column when added
   const taxBase  = (row?.discount_apply_tax ? (preTax - discount) : preTax);
   const tax      = taxBase * (num(taxRatePct,0)/100);
   const grand    = (preTax - discount) + tax;
@@ -222,21 +221,38 @@ function InkLevels({equip, tenantId}){
               ):null}
             </div>
 
-            {bar({lbl:"C", pct:e.levels.c, col:"#00b7eb", thr:e.thr, onRefill:()=>refill(e,"c")})}
-            {bar({lbl:"M", pct:e.levels.m, col:"#ff00a6", thr:e.thr, onRefill:()=>refill(e,"m")})}
-            {bar({lbl:"Y", pct:e.levels.y, col:"#ffd400", thr:e.thr, onRefill:()=>refill(e,"y")})}
-            {bar({lbl:"K", pct:e.levels.k, col:"#000",    thr:e.thr, onRefill:()=>refill(e,"k")})}
+            <InkBar lbl="C"  pct={e.levels.c}  col="#00b7eb" thr={e.thr} onRefill={()=>refill(e,"c")} />
+            <InkBar lbl="M"  pct={e.levels.m}  col="#ff00a6" thr={e.thr} onRefill={()=>refill(e,"m")} />
+            <InkBar lbl="Y"  pct={e.levels.y}  col="#ffd400" thr={e.thr} onRefill={()=>refill(e,"y")} />
+            <InkBar lbl="K"  pct={e.levels.k}  col="#000"    thr={e.thr} onRefill={()=>refill(e,"k")} />
 
-            {e.kind==="uv"  && !e.use_soft_white ? bar({lbl:"W",  pct:e.levels.white,      col:"#fff", thr:e.thr, border:"#ddd", onRefill:()=>refill(e,"white")}):null}
-            {e.kind==="uv"  &&  e.use_soft_white ? bar({lbl:"SW", pct:e.levels.soft_white, col:"#eee", thr:e.thr, border:"#ddd", onRefill:()=>refill(e,"soft_white")}):null}
-            {e.kind==="uv"  && e.levels.gloss!=null ? bar({lbl:"G", pct:e.levels.gloss, col:"#bbb", thr:e.thr, border:"#bbb", onRefill:()=>refill(e,"gloss")}):null}
-            {e.kind==="sub" && e.levels.white!=null ? bar({lbl:"W", pct:e.levels.white, col:"#fff", thr:e.thr, border:"#ddd", onRefill:()=>refill(e,"white")}):null}
+            {e.kind==="uv"  && !e.use_soft_white ? (
+              <InkBar lbl="W"  pct={e.levels.white}      col="#fff" thr={e.thr} border="#ddd" onRefill={()=>refill(e,"white")} />
+            ) : null}
+
+            {e.kind==="uv"  &&  e.use_soft_white ? (
+              <InkBar lbl="SW" pct={e.levels.soft_white} col="#eee" thr={e.thr} border="#ddd" onRefill={()=>refill(e,"soft_white")} />
+            ) : null}
+
+            {e.kind==="uv"  && e.levels.gloss!=null ? (
+              <InkBar lbl="G"  pct={e.levels.gloss} col="#bbb" thr={e.thr} border="#bbb" onRefill={()=>refill(e,"gloss")} />
+            ) : null}
+
+            {e.kind === "sub" && e.levels.white != null
+  ? bar({ lbl:"W", pct:e.levels.white, col:"#fff", thr:e.thr, border:"#ddd", onRefill:()=>refill(e,"white") })
+  : null}
+
           </div>
         ))}
         {list.length===0? <div className="tiny">No UV/Sublimation equipment found.</div>:null}
       </div>
     </div>
   );
+}
+
+// Small JSX wrapper so we don't pass an inline object literal (avoids Babel parse edge cases)
+function InkBar(props){
+  return bar(props);
 }
 
 function bar({lbl,pct,col,thr,border,onRefill}){
@@ -256,28 +272,121 @@ function bar({lbl,pct,col,thr,border,onRefill}){
 }
 
 function normalizeEquip(r){
-  const isUV = String(r.type||"").toLowerCase()==="uv printer";
-  const kind = isUV? "uv" : "sub";
-  const thr = num(r.threshold_pct, 20);
-  const use_soft_white = !!r.use_soft_white;
+  const toStr = (v)=> (v==null ? "" : String(v));
+  const lc = (v)=> toStr(v).toLowerCase();
+  const isUV  = lc(r.type) === "uv printer" || lc(r.type) === "uv";
+  const isSUB = lc(r.type).includes("sublimation") || lc(r.kind) === "sub";
+  const kind  = isUV ? "uv" : (isSUB ? "sub" : lc(r.kind) || "other");
+  const thr   = num(r.threshold_pct ?? r.ink_threshold_pct, 20);
 
-  const jsonLevels = safeJSON(r.ink_levels);
-  const lv = jsonLevels && typeof jsonLevels==="object" ? jsonLevels : {
-    c:r.ink_level_c, m:r.ink_level_m, y:r.ink_level_y, k:r.ink_level_k,
-    white:r.ink_level_white, soft_white:r.ink_level_soft_white, gloss:r.ink_level_gloss
+  // permissive truthy (handles true/1/"true"/"1")
+  const truthy = (v)=>{
+    if (typeof v === "boolean") return v;
+    if (typeof v === "number")  return v === 1;
+    const s = lc(v);
+    return s === "true" || s === "1" || s === "yes";
   };
 
-  const pct = (v)=> Math.max(0, Math.min(100, num(v, 100)));
-  const levels={
-    c: pct(lv.c), m: pct(lv.m), y: pct(lv.y), k: pct(lv.k),
-    white: pct(lv.white), soft_white: pct(lv.soft_white),
+  // read JSON safely
+  const j = safeJSON;
+
+  // --- levels: accept canonical + shorthand keys (and case variants)
+  const rawLv = j(r.ink_levels) ?? {
+    c: r.ink_level_c, m: r.ink_level_m, y: r.ink_level_y, k: r.ink_level_k,
+    white: r.ink_level_white ?? r.ink_level_w,
+    soft_white: r.ink_level_soft_white ?? r.ink_level_sw,
+    gloss: r.ink_level_gloss ?? r.ink_level_g
+  };
+
+  const pull = (o, ...keys)=>{
+    for(const k of keys){
+      if (o?.[k] != null) return o[k];
+    }
+    return null;
+  };
+
+  const lv = {
+    c: pull(rawLv,"c","C"),
+    m: pull(rawLv,"m","M"),
+    y: pull(rawLv,"y","Y"),
+    k: pull(rawLv,"k","K"),
+    white: pull(rawLv,"white","White","WHITE","w","W"),
+    soft_white: pull(rawLv,"soft_white","softWhite","SW","sw"),
+    gloss: pull(rawLv,"gloss","G","g")
+  };
+
+  // clamp 0..100, allow 0 as valid
+  const pct = (v)=> {
+    const n = Number(v);
+    if (Number.isFinite(n)) return Math.max(0, Math.min(100, n));
+    return null;
+  };
+
+  // --- detect "white enabled" for Sublimation from many places
+  let whiteEnabled;
+
+  // From arrays
+  const arrs = [
+    j(r.inks_enabled), j(r.inks_selected),
+    j(r.inks), j(r.ink_choices)
+  ].filter(Array.isArray);
+
+  for (const a of arrs){
+    const has = a.some(x => {
+      const s = lc(x).trim();
+      return s === "white" || s === "w";
+    });
+    if (has){ whiteEnabled = true; break; }
+  }
+
+  // From individual flags
+  if (whiteEnabled === undefined){
+    const candidates = [
+      r.white_enabled, r.has_white, r.enable_white, r.supports_white
+    ];
+    for (const v of candidates){
+      if (v !== undefined){ whiteEnabled = truthy(v); break; }
+    }
+  }
+
+  // From ink_config JSON object
+  if (whiteEnabled === undefined){
+    const cfg = j(r.ink_config);
+    if (cfg && typeof cfg === "object"){
+      const v = cfg.white ?? cfg.White ?? cfg.W ?? cfg.w;
+      if (v !== undefined) whiteEnabled = truthy(v);
+    }
+  }
+
+  // Fallback inference: if we have any stored level for white, consider enabled
+  if (whiteEnabled === undefined){
+    whiteEnabled = lv.white != null && lv.white !== "";
+  }
+
+  // If SUB + white enabled but level missing, default to 100 so it shows
+  const whitePct = isSUB && whiteEnabled ? pct(lv.white ?? 100) : null;
+
+  // finalize levels
+  const levels = {
+    c: pct(lv.c),
+    m: pct(lv.m),
+    y: pct(lv.y),
+    k: pct(lv.k),
+    white: isUV ? pct(lv.white) : whitePct,
+    soft_white: isUV ? pct(lv.soft_white) : null,
     gloss: isUV ? pct(lv.gloss) : null
   };
 
   return {
-    id:r.id, name:r.name||"(Unnamed)", type:r.type||"",
-    kind, thr, use_soft_white,
+    id: r.id,
+    name: r.name || "(Unnamed)",
+    type: r.type || "",
+    kind,
+    thr,
+    use_soft_white: !!r.use_soft_white,
     levels,
     rate_soft_white: num(r.rate_soft_white, 0)
   };
 }
+
+
