@@ -1,65 +1,53 @@
 // src/features/email/templates.js
 import { supabase } from "../../lib/superbase.js";
 
-/**
- * Tiny mustache-style renderer:
- * - Supports nested keys: {{invoice.code}}, {{business.name}}, {{assets.logo_url}}
- * - Supports flat aliases we expose below: {{invoice_code}}, {{business_name}}, etc.
- */
-export function renderTemplate(tpl, ctx) {
+/* ---------------- small utils ---------------- */
+
+const get = (obj, path, dflt=undefined) => {
+  try {
+    return path.split('.').reduce((o,k)=> (o==null? undefined : o[k]), obj) ?? dflt;
+  } catch { return dflt; }
+};
+
+const num = (v, d=0) => {
+  const n = typeof v === 'string' ? parseFloat(v) : Number(v);
+  return Number.isFinite(n) ? n : d;
+};
+
+const money = (v) => `$${num(v,0).toFixed(2)}`;
+const fmtDate = (iso) => {
+  try { return iso ? new Date(iso).toLocaleDateString() : ""; } catch { return ""; }
+};
+
+function resolveBrandLogo(settings){
+  // prefer uploaded branding path
+  if (settings?.brand_logo_path){
+    const { data } = supabase.storage.from("branding").getPublicUrl(settings.brand_logo_path);
+    const url = data?.publicUrl || "";
+    return { url, display: url ? "inline-block" : "none" };
+  }
+  // fallback to manual URL
+  const url = settings?.brand_logo_url || "";
+  return { url, display: url ? "inline-block" : "none" };
+}
+
+/* -------------- tiny mustache-ish renderer -------------- */
+export function renderTemplate(tpl, ctx){
   if (!tpl || typeof tpl !== "string") return "";
-  return tpl.replace(/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g, (_, key) => {
-    // Try nested path first
+  return tpl.replace(/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g, (_, key)=>{
+    // nested first
     const parts = key.split(".");
     let v = ctx;
     for (const p of parts) v = v?.[p];
-    // If not found, try flat alias
+    // flat alias fallback
     if (v == null) v = ctx?.[key];
     return v == null ? "" : String(v);
   });
 }
 
-/* -------------------------------------------------------
-   Helpers: money/date + logo resolution from Settings
--------------------------------------------------------- */
+/* -------------------- INVOICE EMAIL -------------------- */
 
-function toMoney(n) {
-  const num = Number(n || 0);
-  return `$${num.toFixed(2)}`;
-}
-
-function fmtDate(iso) {
-  try {
-    return iso ? new Date(iso).toLocaleDateString() : "";
-  } catch {
-    return "";
-  }
-}
-
-/**
- * Prefer the uploaded logo (branding bucket) if settings.brand_logo_path exists.
- * Falls back to settings.brand_logo_url (manual URL).
- * Returns { url, display } where display is 'inline-block' or 'none'
- */
-function resolveBrandLogo(settings) {
-  let url = "";
-  if (settings?.brand_logo_path) {
-    const { data } = supabase.storage
-      .from("branding")
-      .getPublicUrl(settings.brand_logo_path);
-    url = data?.publicUrl || "";
-  }
-  if (!url && settings?.brand_logo_url) {
-    url = settings.brand_logo_url;
-  }
-  const display = url ? "inline-block" : "none";
-  return { url, display };
-}
-
-/* -------------------- INVOICE -------------------- */
-
-export function invoiceDefaults() {
-  // Default subject + HTML that work with BOTH nested and flat placeholders
+export function invoiceDefaults(){
   return {
     subject: "Invoice {{invoice.code}} from {{business.name}}",
     html: `
@@ -77,18 +65,18 @@ export function invoiceDefaults() {
             <p style="margin:0 0 16px">Please find your invoice attached. Summary:</p>
 
             <table style="width:100%;font-size:14px;border-collapse:collapse">
-              <tr><td style="padding:6px 0">Subtotal</td><td style="padding:6px 0;text-align:right">{{subtotal}}</td></tr>
-              <tr><td style="padding:6px 0">Tax</td><td style="padding:6px 0;text-align:right">{{tax}}</td></tr>
-              <tr><td style="padding:6px 0">Discount</td><td style="padding:6px 0;text-align:right">{{discount}}</td></tr>
-              <tr><td style="padding:6px 0">Deposit</td><td style="padding:6px 0;text-align:right">{{deposit}}</td></tr>
+              <tr><td style="padding:6px 0">Subtotal</td><td style="padding:6px 0;text-align:right">{{money.subtotal}}</td></tr>
+              <tr><td style="padding:6px 0">Tax</td><td style="padding:6px 0;text-align:right">{{money.tax}}</td></tr>
+              <tr><td style="padding:6px 0">Discount</td><td style="padding:6px 0;text-align:right">{{money.discount}}</td></tr>
+              <tr><td style="padding:6px 0">Deposit</td><td style="padding:6px 0;text-align:right">{{money.deposit}}</td></tr>
               <tr>
                 <td style="padding:8px 0;font-weight:700;border-top:1px solid #eee">Total Due</td>
-                <td style="padding:8px 0;text-align:right;font-weight:700;border-top:1px solid #eee">{{grand_total}}</td>
+                <td style="padding:8px 0;text-align:right;font-weight:700;border-top:1px solid #eee">{{money.grand}}</td>
               </tr>
             </table>
 
             <div style="margin-top:16px">
-              <a href="{{pdf_url}}" style="display:inline-block;padding:10px 14px;border-radius:8px;background:#111;color:#fff;text-decoration:none">View invoice PDF</a>
+              <a href="{{links.pdf_url}}" style="display:inline-block;padding:10px 14px;border-radius:8px;background:#111;color:#fff;text-decoration:none">View invoice PDF</a>
             </div>
           </div>
           <div style="padding:12px 20px;background:#fafafa;color:#777;font-size:12px;border-top:1px solid #eee">
@@ -99,24 +87,88 @@ export function invoiceDefaults() {
   };
 }
 
-/**
- * Build a context object for invoices with nested + flat aliases.
- * Pass the exact invoice row, customer object, and settings row you already fetch.
- * Also pass an optional signed PDF url as pdfUrl if you have it.
- */
-export function buildInvoiceContext({ invoice, customer, settings, pdfUrl }) {
-  const money = toMoney;
+export function buildInvoiceContext({ invoice, customer, settings, pdfUrl }){
   const logo = resolveBrandLogo(settings);
+
+  // 1) Subtotal (pre-tax)
+  const subtotalPreTax =
+    num(get(invoice, "totals.totalChargePreTax")) ||
+    num(get(invoice, "totals.subtotal")) ||
+    num(get(invoice, "totals.totalCharge")) - num(get(invoice, "totals.tax")) ||
+    0;
+
+  // 2) Discount amount (AMOUNT, not percent)
+  const dType = get(invoice, "discount_type");            // 'percent' | 'flat' | undefined
+  const dValRaw = get(invoice, "discount_value", get(invoice,"discount", 0));
+  const dVal = num(dValRaw, 0);
+
+  // try stored amount first if editor saved it
+  let discountAmt =
+    num(get(invoice,"totals.discount_amount")) ||
+    num(get(invoice,"totals.discount")) ||
+    0;
+
+  if (!discountAmt) {
+    if (dType === "percent" && dVal > 0) {
+      discountAmt = (subtotalPreTax * dVal) / 100;
+    } else if (dType === "flat" && dVal > 0) {
+      discountAmt = dVal;
+    } else {
+      // legacy: some rows used invoice.discount as amount without type
+      // if so, treat it as a flat amount
+      if (!dType && dVal > 0) discountAmt = dVal;
+    }
+  }
+  if (discountAmt > subtotalPreTax) discountAmt = subtotalPreTax;
+
+  // 3) Deposit
+  const depositAmt =
+    num(get(invoice,"totals.deposit")) ||
+    num(get(invoice,"deposit_amount")) ||
+    num(get(invoice,"deposit")) ||
+    0;
+
+  // 4) Tax
+  let taxAmt = num(get(invoice,"totals.tax"));
+  if (!taxAmt) {
+    const taxPct =
+      num(get(invoice,"totals.taxPct")) ||
+      num(get(settings,"tax_rate"))     ||
+      num(get(invoice,"tax_rate"))      ||
+      0;
+
+    const applyTaxToDiscount =
+      !!get(invoice,"totals.discountApplyTax") ||
+      !!get(invoice,"discount_apply_tax");
+
+    const taxBase = applyTaxToDiscount
+      ? Math.max(0, subtotalPreTax - discountAmt)
+      : subtotalPreTax;
+
+    taxAmt = (taxPct/100) * taxBase;
+  }
+
+  // 5) Grand total
+  const grand =
+    num(get(invoice,"totals.grand")) ||
+    Math.max(0, subtotalPreTax - discountAmt + taxAmt - depositAmt);
+
+  const moneyObj = {
+    subtotal: money(subtotalPreTax),
+    tax:      money(taxAmt),
+    discount: money(discountAmt),
+    deposit:  money(depositAmt),
+    grand:    money(grand),
+  };
 
   const nested = {
     business: {
-      name: settings?.business_name || "",
-      email: settings?.business_email || ""
+      name:  settings?.business_name || "",
+      email: settings?.business_email || "",
     },
-    // Make uploaded logo available to both legacy & designer templates
     assets: {
       logo_url: logo.url,
-      logo_url_display: logo.display
+      logo_url_display: logo.display,
     },
     logo_url: logo.url,
     logo_url_display: logo.display,
@@ -125,40 +177,42 @@ export function buildInvoiceContext({ invoice, customer, settings, pdfUrl }) {
     invoice: { code: invoice?.code, created_at: invoice?.created_at },
     customer: { name: customer?.name || "", email: customer?.email || "" },
 
-    // Totals (compute from invoice.totals when present)
-    subtotal: money(invoice?.totals?.totalChargePreTax ?? invoice?.totals?.subtotal ?? invoice?.totals?.totalCharge ?? 0),
-    tax:      money(invoice?.totals?.tax ?? 0),
-    discount: money(resolveDiscountAmount(invoice)),
-    deposit:  money(resolveDepositAmount(invoice)),
-    grand_total: money(invoice?.totals?.grand ?? 0),
-    pdf_url: pdfUrl || ""
+    money: moneyObj,
+
+    // legacy flat keys
+    subtotal:    moneyObj.subtotal,
+    tax:         moneyObj.tax,
+    discount:    moneyObj.discount,
+    deposit:     moneyObj.deposit,
+    grand_total: moneyObj.grand,
+
+    links: { pdf_url: pdfUrl || "" },
+    pdf_url: pdfUrl || "",
   };
 
-  // Flat aliases for backward compatibility
   const flatAliases = {
-    business_name: nested.business.name,
+    business_name:  nested.business.name,
     business_email: nested.business.email,
-    // legacy keys
-    logo_url: nested.logo_url,
+    logo_url:       nested.logo_url,
     logo_url_display: nested.logo_url_display,
-    date: nested.date,
-    invoice_code: nested.invoice.code,
-    customer_name: nested.customer.name,
+    date:           nested.date,
+    invoice_code:   nested.invoice.code,
+    customer_name:  nested.customer.name,
     customer_email: nested.customer.email,
-    subtotal: nested.subtotal,
-    tax: nested.tax,
-    discount: nested.discount,
-    deposit: nested.deposit,
-    grand_total: nested.grand_total,
-    pdf_url: nested.pdf_url
+    subtotal:       nested.subtotal,
+    tax:            nested.tax,
+    discount:       nested.discount,
+    deposit:        nested.deposit,
+    grand_total:    nested.grand_total,
+    pdf_url:        nested.pdf_url,
   };
 
-  return { ...nested, ...flatAliases, money };
+  return { ...nested, ...flatAliases };
 }
 
-/* -------------------- PURCHASE ORDER -------------------- */
+/* -------------------- PURCHASE ORDER EMAIL -------------------- */
 
-export function poDefaults() {
+export function poDefaults(){
   return {
     subject: "Purchase Order {{po.code}} from {{business.name}}",
     html: `
@@ -168,7 +222,6 @@ export function poDefaults() {
             <img src="{{assets.logo_url}}" alt="" style="height:32px;display:{{assets.logo_url_display}}"/>
             <div style="font-weight:700;font-size:18px">{{business.name}}</div>
           </div>
-
           <div style="padding:20px">
             <h2 style="margin:0 0 6px">Purchase Order {{po.code}}</h2>
             <div style="color:#666;font-size:13px;margin-bottom:14px">{{date}}</div>
@@ -182,10 +235,9 @@ export function poDefaults() {
             </table>
 
             <div style="margin-top:16px">
-              <a href="{{pdf_url}}" style="display:inline-block;padding:10px 14px;border-radius:8px;background:#111;color:#fff;text-decoration:none">View PO PDF</a>
+              <a href="{{links.pdf_url}}" style="display:inline-block;padding:10px 14px;border-radius:8px;background:#111;color:#fff;text-decoration:none">View PO PDF</a>
             </div>
           </div>
-
           <div style="padding:12px 20px;background:#fafafa;color:#777;font-size:12px;border-top:1px solid #eee">
             Sent by {{business.name}} • {{business.email}}
           </div>
@@ -194,21 +246,17 @@ export function poDefaults() {
   };
 }
 
-/**
- * Build a context for purchase orders (nested + flat aliases).
- * itemsCount is optional (number). pdfUrl optional.
- */
-export function buildPOContext({ po, vendor, settings, itemsCount, pdfUrl }) {
+export function buildPOContext({ po, vendor, settings, itemsCount, pdfUrl }){
   const logo = resolveBrandLogo(settings);
 
   const nested = {
     business: {
-      name: settings?.business_name || "",
-      email: settings?.business_email || ""
+      name:  settings?.business_name || "",
+      email: settings?.business_email || "",
     },
     assets: {
       logo_url: logo.url,
-      logo_url_display: logo.display
+      logo_url_display: logo.display,
     },
     logo_url: logo.url,
     logo_url_display: logo.display,
@@ -217,41 +265,23 @@ export function buildPOContext({ po, vendor, settings, itemsCount, pdfUrl }) {
     po: { code: po?.code, created_at: po?.created_at },
     vendor: { name: vendor?.name || "", email: vendor?.email || "" },
     items_count: itemsCount ?? "",
-    pdf_url: pdfUrl || ""
+
+    links: { pdf_url: pdfUrl || "" },
+    pdf_url: pdfUrl || "",
   };
 
   const flatAliases = {
-    business_name: nested.business.name,
+    business_name:  nested.business.name,
     business_email: nested.business.email,
-    logo_url: nested.logo_url,
+    logo_url:       nested.logo_url,
     logo_url_display: nested.logo_url_display,
-    date: nested.date,
-    po_code: nested.po.code,
-    vendor_name: nested.vendor.name,
-    vendor_email: nested.vendor.email,
-    items_count: nested.items_count,
-    pdf_url: nested.pdf_url
+    date:           nested.date,
+    po_code:        nested.po.code,
+    vendor_name:    nested.vendor.name,
+    vendor_email:   nested.vendor.email,
+    items_count:    nested.items_count,
+    pdf_url:        nested.pdf_url,
   };
 
   return { ...nested, ...flatAliases };
-}
-
-/* -------------------- discount/deposit helpers -------------------- */
-
-function resolveDiscountAmount(invoice) {
-  // Prefer totals.discount if present; otherwise compute from edit fields
-  if (typeof invoice?.totals?.discount === "number") return invoice.totals.discount;
-  const type = invoice?.discount_type;
-  const val = Number(invoice?.discount_value || 0);
-  const base = Number(invoice?.totals?.totalChargePreTax ?? 0);
-  if (!val || val <= 0) return 0;
-  if (type === "percent") return (base * val) / 100;
-  if (type === "flat") return val;
-  return 0;
-}
-
-function resolveDepositAmount(invoice) {
-  if (typeof invoice?.totals?.deposit === "number") return invoice.totals.deposit;
-  const v = Number(invoice?.deposit_amount || 0);
-  return Number.isFinite(v) ? v : 0;
 }

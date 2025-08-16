@@ -132,55 +132,114 @@ export default function PurchaseOrders() {
     }
   };
 
+  async function ensurePoPdf(po, settings) {
+  if (po.pdf_path) {
+    const { data, error } = await supabase.storage.from("pdfs").createSignedUrl(po.pdf_path, 60 * 60);
+    if (!error && data?.signedUrl) {
+      return { path: po.pdf_path, signedUrl: data.signedUrl };
+    }
+  }
+
+  const tenantId = po.tenant_id;
+  const code = po.code;
+
+  // Minimal printable HTML (you can reuse your existing renderPOHtml if you want)
+  const container = document.createElement("div");
+  container.style.position = "fixed";
+  container.style.left = "-9999px";
+  container.style.top = "-9999px";
+  container.style.width = "800px";
+  container.innerHTML = `
+    <div style="font-family:Arial, sans-serif; padding:24px; width:800px;">
+      <div style="display:flex; justify-content:space-between;">
+        <div><h2 style="margin:0 0 6px 0;">Purchase Order</h2><div class="mono"># ${escapeHtml(code)}</div></div>
+        <div style="text-align:right">
+          <div style="font-size:14px">${escapeHtml(settings?.business_name || "")}</div>
+          <div style="font-size:12px; color:#555">${escapeHtml(settings?.business_email || "")}</div>
+        </div>
+      </div>
+      <div style="margin:12px 0; height:1px; background:#eee;"></div>
+      <div style="font-size:13px; color:#666">Generated from system</div>
+    </div>
+  `;
+  document.body.appendChild(container);
+
+  try {
+    const { path, url } = await captureElementToPdf({
+      element: container,
+      tenantId,
+      kind: "purchase-orders",
+      code
+    });
+
+    // update record
+    await supabase.from("purchase_orders").update({ pdf_path: path }).eq("id", po.id).eq("tenant_id", tenantId);
+
+    // sign it
+    const { data, error } = await supabase.storage.from("pdfs").createSignedUrl(path, 60 * 60);
+    if (!error && data?.signedUrl) {
+      return { path, signedUrl: data.signedUrl };
+    }
+    return { path };
+  } finally {
+    document.body.removeChild(container);
+  }
+}
+
   // email sender — prefill vendor email, allow override (uses templates)
   // sendEmail(po, to) — call this from your Confirm modal "Yes"
-const sendEmail = async (po, to) => {
+const sendEmail = async (po, toOverride) => {
   try {
-    // 1) Load vendor (so we can prefill/ctx vendor info)
-    const { data: vendor } = await supabase
-      .from("vendors")
-      .select("id,name,email,phone,address")
-      .eq("id", po.vendor_id)
-      .maybeSingle();
+    const tenantId = po.tenant_id;
 
-    // 2) Load settings (may include custom PO subject/html)
-    const { data: settings } = await supabase
-      .from("settings")
-      .select("business_name,business_email,brand_logo_url,brand_logo_path,email_po_subject,email_po_template_html,currency")
+    // 1) Load settings + vendor
+    const [{ data: settings }, { data: vendor }] = await Promise.all([
+      supabase.from("settings").select("*").eq("tenant_id", tenantId).single(),
+      supabase.from("vendors").select("id,name,email").eq("id", po.vendor_id).single(),
+    ]);
+
+    // 2) Count items for template (optional – keep your own listPOItems if you have it in scope)
+    const { data: items } = await supabase
+      .from("po_items")
+      .select("id")
       .eq("tenant_id", tenantId)
-      .maybeSingle();
+      .eq("po_id", po.id);
+    const itemsCount = items?.length || 0;
 
-    // 3) Signed PDF URL (if you stored one)
-    let pdfUrl = "";
-    if (po.pdf_path) {
-      const { data: signed } = await supabase
-        .storage
-        .from("pdfs")
-        .createSignedUrl(po.pdf_path, 60 * 60);
-      if (signed?.signedUrl) pdfUrl = signed.signedUrl;
-    }
+    // 3) Ensure there is a PDF; if not, generate and save
+    const pdfInfo = await ensurePoPdf(po, settings);
 
-    // 4) Load items for context (your listPOItems already exists)
-    const items = await listPOItems(tenantId, po.id);
+    // 4) Build context
+    const ctx = buildPOContext({
+      po,
+      vendor,
+      settings,
+      itemsCount,
+      pdfUrl: pdfInfo?.signedUrl || "",
+    });
 
-    // 5) Pick template strings (custom or defaults)
-    const dft     = poDefaults(); // { subject, html }
-    const subjTpl = settings?.email_po_subject || dft.subject;
-    const htmlTpl = settings?.email_po_template_html || dft.html;
+    // 5) Template pick + render
+    const { subject: subjDefault, html: htmlDefault } = poDefaults();
+    const subjectTpl = settings?.email_po_subject || subjDefault;
+    const htmlTpl    = settings?.email_po_template_html || htmlDefault;
 
-    // 6) Build PO context & render
-    const ctx = buildPOContext({ po, vendor, settings, items, pdfUrl });
-    const subject = renderTemplate(subjTpl, ctx);
+    const subject = renderTemplate(subjectTpl, ctx);
     const html    = renderTemplate(htmlTpl, ctx);
 
-    // 7) Optional attachment
-    const attachments = pdfUrl ? [{ filename: `${po.code}.pdf`, url: pdfUrl }] : undefined;
+    // 6) To address (prefer override; else vendor.email)
+    const to = (toOverride || vendor?.email || "").trim();
+    if (!to) throw new Error("Vendor email not found. You can override it in the dialog.");
+
+    // 7) Attach PDF
+    const attachments = pdfInfo?.signedUrl
+      ? [{ filename: `${po.code}.pdf`, url: pdfInfo.signedUrl }]
+      : [];
 
     await sendEmailDoc({ to, subject, html, attachments });
-    alert("Email sent.");
-    setEmailFor(null); // if you keep that modal state
+    alert("PO email sent.");
+    setEmailFor(null);
   } catch (err) {
-    console.error(err);
+    console.error("Email error:", err);
     alert(err.message || "Failed to send email");
   }
 };

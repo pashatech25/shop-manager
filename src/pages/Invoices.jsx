@@ -4,7 +4,6 @@ import {supabase} from "../lib/superbase.js";
 import Editor from "../features/invoices/Editor.jsx";
 import {captureElementToPdf} from "../features/pdf/service.js";
 import Confirm from "../features/ui/Confirm.jsx";
-// email templates (exactly like PO page)
 import {
   renderTemplate,
   invoiceDefaults,
@@ -12,17 +11,69 @@ import {
 } from "../features/email/templates.js";
 import { sendEmailDoc } from "../lib/email.js";
 
-
-
-/* ========================================================================== */
-/*                               HELPER FUNCTIONS                            */
-/* ========================================================================== */
-
+// ---------- tiny utils ----------
 const num = (v, d=0)=> {
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
 };
+const esc = (s) =>
+  String(s ?? "").replace(/[&<>"]/g, (m) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[m]));
+const safeLine = (s) => (s ? `<div style="font-size:13px; color:#555">${esc(s)}</div>` : "");
 
+// ---------- settings helpers ----------
+async function fetchSettingsOrThrow(tenantId) {
+  const { data, error } = await supabase
+    .from("settings")
+    .select("*")
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) throw new Error("No business settings row found for this tenant.");
+
+  const s = { ...data };
+
+  // Normalize common keys used by UI / PDF
+  s.business_name   = s.business_name   ?? s.name ?? s.company_name ?? s.org_name ?? "";
+  s.business_email  = s.business_email  ?? s.email ?? s.contact_email ?? "";
+  s.business_phone  = s.business_phone  ?? s.phone ?? s.contact_phone ?? "";
+  s.business_address= s.business_address?? s.address ?? s.street_address ?? "";
+
+  s.brand_logo_url  = s.brand_logo_url ?? s.logo_url ?? "";
+  s.brand_logo_path = s.brand_logo_path ?? s.brand_logo ?? s.logo_path ?? "";
+
+  s.tax_rate        = num(s.tax_rate, 0);
+  s.currency        = s.currency || "USD";
+
+  return s;
+}
+
+async function resolveLogoUrl(settings) {
+  if (!settings) return "";
+  if (settings.brand_logo_url) return settings.brand_logo_url;
+
+  const path = settings.brand_logo_path || "";
+  if (!path) return "";
+
+  async function tryBucket(bucket) {
+    try {
+      const { data } = supabase.storage.from(bucket).getPublicUrl(path);
+      if (data?.publicUrl) return data.publicUrl;
+    } catch (_) {}
+    try {
+      const { data, error } = await supabase
+        .storage
+        .from(bucket)
+        .createSignedUrl(path, 60 * 60);
+      if (!error && data?.signedUrl) return data.signedUrl;
+    } catch (_) {}
+    return "";
+  }
+
+  return (await tryBucket("branding")) || (await tryBucket("Branding")) || "";
+}
+
+// ---------- data helpers ----------
 async function loadPriceMaps(tenantId){
   const [mats, equips] = await Promise.all([
     supabase.from("materials")
@@ -40,20 +91,17 @@ async function loadPriceMaps(tenantId){
   return {matMap, eqMap};
 }
 
-/** Recompute charges from the invoice's items, independent of stale totals */
 function recomputeChargesFromItems(items, {matMap, eqMap}, marginPct=100){
   const mats = Array.isArray(items?.materials)? items.materials : [];
   const eqs  = Array.isArray(items?.equipments)? items.equipments : [];
   const adds = Array.isArray(items?.addons)? items.addons : [];
   const labs = Array.isArray(items?.labor)? items.labor : [];
 
-  // Materials charge from selling price
   let materialsCharge=0;
   for(const l of mats){
     materialsCharge += num(l.qty)*num(matMap.get(l.material_id));
   }
 
-  // Equipment & UV/Sublimation ink
   let equipmentCharge=0, uvInkCost=0;
   for(const l of eqs){
     const type=(l.type||"").toLowerCase();
@@ -77,7 +125,6 @@ function recomputeChargesFromItems(items, {matMap, eqMap}, marginPct=100){
   const margin = 1 + (num(marginPct)/100);
   const inkCharge = uvInkCost * margin;
 
-  // Labor / Add-ons
   let laborCharge=0;   for(const l of labs){ laborCharge += num(l.hours)*num(l.rate); }
   let addonsCharge=0;  for(const a of adds){ addonsCharge += num(a.qty)*num(a.price); }
 
@@ -85,12 +132,9 @@ function recomputeChargesFromItems(items, {matMap, eqMap}, marginPct=100){
   return {equipmentCharge, materialsCharge, laborCharge, addonsCharge, inkCharge, preTax};
 }
 
-/** Read discount/deposit/showInk robustly across your schema */
 function extractDiscountModel(row){
   const t = row?.totals || {};
-
   let type = row?.discount_type ?? t?.discountType ?? null;
-
   let value =
     row?.discount ??
     row?.discount_value ??
@@ -98,12 +142,10 @@ function extractDiscountModel(row){
     t?.discountValue ??
     t?.discountAmount ??
     t?.discount;
-
   if(!type){
     if(row?.discount_percent != null || t?.discountPercent != null) type = "percent";
     else type = "flat";
   }
-
   if(value == null){
     if(type === "percent"){
       value = row?.discount_percent ?? t?.discountPercent ?? 0;
@@ -111,7 +153,6 @@ function extractDiscountModel(row){
       value = 0;
     }
   }
-
   return {
     type: (type === "percent" ? "percent" : "flat"),
     value: num(value, 0),
@@ -121,18 +162,14 @@ function extractDiscountModel(row){
   };
 }
 
-/** ✅ Correct discount math for both modes */
 function computeBill(preTax, {type, value, applyTax, deposit}, taxRatePct){
   const discountAmt = (type==="percent") ? (preTax * (num(value)/100)) : num(value);
-
   if (applyTax) {
-    // discount BEFORE tax
     const base = Math.max(0, preTax - discountAmt);
     const tax  = base * (num(taxRatePct)/100);
     const grand = Math.max(0, base + tax - num(deposit));
     return {discountAmt, tax, grand};
   } else {
-    // discount AFTER tax
     const tax  = preTax * (num(taxRatePct)/100);
     const subtotalAfterTax = preTax + tax;
     const grand = Math.max(0, subtotalAfterTax - discountAmt - num(deposit));
@@ -140,29 +177,91 @@ function computeBill(preTax, {type, value, applyTax, deposit}, taxRatePct){
   }
 }
 
-/* ========================================================================== */
-/*                                MAIN COMPONENT                             */
-/* ========================================================================== */
+// ---------- one HTML builder used by both preview & email attachment ----------
+function buildInvoiceHtml({inv, charges, disc, tax, grand, settings, customer, logoUrl}) {
+  const c = customer || {};
+  const billToHtml = `
+    <div style="flex:1">
+      <div style="font-size:12px; color:#888; margin-bottom:6px;">Bill To</div>
+      ${safeLine(c.name || c.company)}
+      ${c.company && c.name ? safeLine(c.company) : ""}
+      ${safeLine(c.email)}
+      ${safeLine(c.phone)}
+      ${safeLine(c.address)}
+    </div>
+  `;
 
+  const fromHtml = `
+    <div style="flex:1; text-align:right">
+      <div style="font-size:12px; color:#888; margin-bottom:6px;">From</div>
+      ${safeLine(settings?.business_name)}
+      ${safeLine(settings?.business_email)}
+      ${safeLine(settings?.business_phone)}
+      ${safeLine(settings?.business_address)}
+    </div>
+  `;
+
+  return `
+  <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background:#F6F7F9; padding:24px; width:800px;">
+    <div style="max-width:800px; margin:0 auto; background:#fff; border-radius:16px; box-shadow:0 12px 30px rgba(0,0,0,.06); overflow:hidden;">
+      <div style="display:flex; align-items:center; justify-content:space-between; padding:20px 24px; border-bottom:1px solid #eee;">
+        <div>
+          <div style="font-size:13px; color:#888; letter-spacing:.08em;">INVOICE</div>
+          <div style="font-weight:700; font-size:22px; margin-top:4px;">#${esc(inv.code)}</div>
+          <div style="font-size:12px; color:#666; margin-top:2px;">${new Date(inv.created_at).toLocaleString()}</div>
+        </div>
+        <div>
+          ${logoUrl ? `<img src="${esc(logoUrl)}" alt="" style="height:40px; object-fit:contain;"/>`
+                    : `<div style="font-weight:700;font-size:18px">${esc(settings?.business_name || '')}</div>`}
+        </div>
+      </div>
+      <div style="display:flex; gap:24px; padding:18px 24px 6px 24px;">
+        ${billToHtml}
+        ${fromHtml}
+      </div>
+      <div style="padding:16px 24px 6px 24px;">
+        <table style="width:100%; border-collapse:collapse; font-size:14px;">
+          <tbody>
+            <tr><td style="padding:6px 0; color:#222;">Equipment</td><td style="padding:6px 0; text-align:right;">$${Number(charges.equipmentCharge).toFixed(2)}</td></tr>
+            <tr><td style="padding:6px 0; color:#222;">Materials</td><td style="padding:6px 0; text-align:right;">$${Number(charges.materialsCharge).toFixed(2)}</td></tr>
+            <tr><td style="padding:6px 0; color:#222;">Labor</td><td style="padding:6px 0; text-align:right;">$${Number(charges.laborCharge).toFixed(2)}</td></tr>
+            <tr><td style="padding:6px 0; color:#222;">Add-ons</td><td style="padding:6px 0; text-align:right;">$${Number(charges.addonsCharge).toFixed(2)}</td></tr>
+            ${disc.showInk ? `<tr><td style="padding:6px 0; color:#222;">UV/Sublimation Ink</td><td style="padding:6px 0; text-align:right;">$${Number(charges.inkCharge).toFixed(2)}</td></tr>` : ""}
+            <tr><td colspan="2"><div style="height:1px; background:#eee; margin:10px 0;"></div></td></tr>
+            <tr><td style="padding:6px 0; font-weight:600;">Subtotal</td><td style="padding:6px 0; text-align:right; font-weight:600;">$${Number(charges.preTax).toFixed(2)}</td></tr>
+            <tr><td style="padding:6px 0;">Discount</td><td style="padding:6px 0; text-align:right;">−$${Number((disc.type==="percent" ? charges.preTax*(disc.value/100) : disc.value)).toFixed(2)}</td></tr>
+            <tr><td style="padding:6px 0;">Tax (${Number(settings?.tax_rate||0).toFixed(2)}%)</td><td style="padding:6px 0; text-align:right;">$${Number(tax).toFixed(2)}</td></tr>
+            <tr><td style="padding:6px 0;">Deposit</td><td style="padding:6px 0; text-align:right;">−$${Number(disc.deposit).toFixed(2)}</td></tr>
+            <tr><td colspan="2"><div style="height:1px; background:#eee; margin:10px 0;"></div></td></tr>
+            <tr><td style="padding:8px 0; font-size:16px; font-weight:700;">Total</td><td style="padding:8px 0; text-align:right; font-size:16px; font-weight:700;">$${Number(grand).toFixed(2)}</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div style="padding:12px 24px 20px 24px; color:#666; font-size:12px; border-top:1px solid #f3f3f3; margin-top:8px;">
+        Thank you for your business.
+      </div>
+    </div>
+  </div>`;
+}
+
+// ---------- main component ----------
 export default function Invoices(){
-  // ==================== STATE ====================
   const {tenantId} = useTenant();
   const [rows, setRows] = useState([]);
   const [editing, setEditing] = useState(null);
 
   const [viewRow, setViewRow] = useState(null);
   const [viewCustomer, setViewCustomer] = useState(null);
+  const [viewSettings, setViewSettings] = useState(null);
+
   const [settings, setSettings] = useState(null);
 
-  // Email + PDF preview
   const [emailFor, setEmailFor] = useState(null);
-  const [emailDefault, setEmailDefault] = useState(""); // <-- prefill here
+  const [emailDefault, setEmailDefault] = useState("");
   const [pdfUrl, setPdfUrl] = useState("");
   const [pdfOpen, setPdfOpen] = useState(false);
   const printRef = useRef(null);
 
-  // ==================== DATA LOADING ====================
-  
   const load = async () => {
     if(!tenantId) return;
     const {data} = await supabase
@@ -171,90 +270,180 @@ export default function Invoices(){
       .eq("tenant_id", tenantId)
       .order("created_at",{ascending:false});
     setRows(data||[]);
-    const {data:st} = await supabase
-      .from("settings")
-      .select("tax_rate,currency")
-      .eq("tenant_id", tenantId)
-      .maybeSingle();
-    setSettings(st||{tax_rate:0,currency:"USD"});
+
+    try {
+      const st = await fetchSettingsOrThrow(tenantId);
+      setSettings(st);
+    } catch (e) {
+      console.warn("Settings load failed:", e?.message || e);
+      setSettings(null);
+    }
   };
-  
   useEffect(()=>{ load(); },[tenantId]);
 
-  // ==================== INVOICE VIEW ====================
-  
   const openView = async (row) => {
-    setViewRow(null); setViewCustomer(null);
-    const [custRes, maps] = await Promise.all([
-      row?.customer_id
-        ? supabase.from("customers").select("id,company,name,email,phone,address,website").eq("id", row.customer_id).maybeSingle()
-        : Promise.resolve({data:null}),
-      loadPriceMaps(tenantId)
-    ]);
+    try {
+      if (!tenantId) return;
 
-    const marginPct = row?.items?.meta?.marginPct ?? 100;
-    const charges = recomputeChargesFromItems(row?.items, maps, marginPct);
-    const disc = extractDiscountModel(row);
+      const [st, custRes, maps] = await Promise.all([
+        fetchSettingsOrThrow(tenantId),
+        row?.customer_id
+          ? supabase.from("customers").select("id,company,name,email,phone,address,website").eq("id", row.customer_id).maybeSingle()
+          : Promise.resolve({data:null}),
+        loadPriceMaps(tenantId)
+      ]);
 
-    const t = row?.totals || {};
-    const preTax = num(charges.preTax,
-      num(t.totalChargePreTax,
-        num(t.equipmentCharge)+num(t.materialsCharge)+num(t.laborCharge)+num(t.addonsCharge)+num(t.inkCharge)
-      )
-    );
+      const marginPct = row?.items?.meta?.marginPct ?? 100;
+      const charges = recomputeChargesFromItems(row?.items, maps, marginPct);
+      const disc = extractDiscountModel(row);
+      const t = row?.totals || {};
+      const preTax = num(charges.preTax,
+        num(t.totalChargePreTax,
+          num(t.equipmentCharge)+num(t.materialsCharge)+num(t.laborCharge)+num(t.addonsCharge)+num(t.inkCharge)
+        )
+      );
+      const totals = {
+        equipmentCharge: charges.equipmentCharge,
+        materialsCharge: charges.materialsCharge,
+        laborCharge:     charges.laborCharge,
+        addonsCharge:    charges.addonsCharge,
+        inkCharge:       charges.inkCharge,
+        totalChargePreTax: preTax,
+        showInkUsage:    disc.showInk
+      };
 
-    const totals = {
-      equipmentCharge: charges.equipmentCharge,
-      materialsCharge: charges.materialsCharge,
-      laborCharge:     charges.laborCharge,
-      addonsCharge:    charges.addonsCharge,
-      inkCharge:       charges.inkCharge,
-      totalChargePreTax: preTax,
-      showInkUsage:    disc.showInk
-    };
-
-    setViewCustomer(custRes.data||null);
-    setViewRow({...row, totals});
+      setViewSettings(st);
+      setViewCustomer(custRes.data||null);
+      setViewRow({...row, totals});
+    } catch (e) {
+      console.error("openView error:", e);
+      alert("Could not load invoice details.");
+    }
   };
 
-  // ==================== PDF GENERATION ====================
-  
   const generatePdf = async (r) => {
-    if(!printRef.current) return;
-    const {matMap, eqMap} = await loadPriceMaps(tenantId);
-    const marginPct = r?.items?.meta?.marginPct ?? 100;
-    const charges = recomputeChargesFromItems(r?.items, {matMap, eqMap}, marginPct);
-    const disc = extractDiscountModel(r);
-    const bill = computeBill(charges.preTax, disc, settings?.tax_rate);
+    if (!printRef.current) return;
 
-    const html = `
-      <div style="font-family:Arial;padding:24px;width:800px">
-        <h2 style="margin:0 0 6px 0">Invoice <span style="font-weight:normal">#${r.code}</span></h2>
-        <div style="margin:8px 0 16px 0; font-size:12px; color:#555">Date: ${new Date(r.created_at).toLocaleString()}</div>
-        <table style="width:100%;border-collapse:collapse;font-size:14px">
-          <tbody>
-            <tr><td>Equipment</td><td style="text-align:right">$${num(charges.equipmentCharge).toFixed(2)}</td></tr>
-            <tr><td>Materials</td><td style="text-align:right">$${num(charges.materialsCharge).toFixed(2)}</td></tr>
-            <tr><td>Labor</td><td style="text-align:right">$${num(charges.laborCharge).toFixed(2)}</td></tr>
-            <tr><td>Add-ons</td><td style="text-align:right">$${num(charges.addonsCharge).toFixed(2)}</td></tr>
-            ${disc.showInk ? `<tr><td>UV/Sublimation Ink (margin applied)</td><td style="text-align:right">$${num(charges.inkCharge).toFixed(2)}</td></tr>` : ""}
-            <tr><td><b>Subtotal</b></td><td style="text-align:right"><b>$${num(charges.preTax).toFixed(2)}</b></td></tr>
-            <tr><td>Discount</td><td style="text-align:right">−$${num(bill.discountAmt).toFixed(2)}</td></tr>
-            <tr><td>Tax (${num(settings?.tax_rate).toFixed(2)}%)</td><td style="text-align:right">$${num(bill.tax).toFixed(2)}</td></tr>
-            <tr><td>Deposit</td><td style="text-align:right">−$${num(disc.deposit).toFixed(2)}</td></tr>
-            <tr><td><b>Total</b></td><td style="text-align:right"><b>$${num(bill.grand).toFixed(2)}</b></td></tr>
-          </tbody>
-        </table>
-      </div>`;
+    // Ensure normalized settings
+    let st = viewSettings || settings;
+    if (!st) {
+      try {
+        st = await fetchSettingsOrThrow(tenantId);
+        setSettings(st);
+      } catch (e) {
+        alert("Business settings are missing for this tenant. Please complete Settings → Business.");
+        return;
+      }
+    }
+
+    const [{ data: customer }, maps, logoUrl] = await Promise.all([
+      r?.customer_id
+        ? supabase
+            .from("customers")
+            .select("id,company,name,email,phone,address,website")
+            .eq("id", r.customer_id)
+            .maybeSingle()
+        : Promise.resolve({ data: null }),
+      loadPriceMaps(tenantId),
+      resolveLogoUrl(st),
+    ]);
+
+    const marginPct = r?.items?.meta?.marginPct ?? 100;
+    const charges = recomputeChargesFromItems(r?.items, maps, marginPct);
+    const disc = extractDiscountModel(r);
+    const { tax, grand } = computeBill(charges.preTax, disc, st?.tax_rate);
+
+    // Reuse the *same* HTML for screen preview
+    const html = buildInvoiceHtml({
+      inv: r, charges, disc, tax, grand,
+      settings: st,
+      customer: customer || {},
+      logoUrl
+    });
+
     printRef.current.innerHTML = html;
 
-    const {url} = await captureElementToPdf({element: printRef.current, tenantId, kind:"invoices", code:r.code});
+    const { url } = await captureElementToPdf({
+      element: printRef.current,
+      tenantId,
+      kind: "invoices",
+      code: r.code
+    });
+
     setPdfUrl(url);
     setPdfOpen(true);
   };
 
-  // ==================== EMAIL FUNCTIONALITY ====================
-  
+  // Use the *same* HTML to generate the attachment PDF (offscreen) so it matches the screen preview
+  async function ensureInvoicePdf(inv, settingsFull) {
+    if (inv.pdf_path) {
+      const { data, error } = await supabase.storage.from("pdfs").createSignedUrl(inv.pdf_path, 60 * 60);
+      if (!error && data?.signedUrl) {
+        return { path: inv.pdf_path, signedUrl: data.signedUrl };
+      }
+    }
+
+    const [{ data: customer }, maps, logoUrl] = await Promise.all([
+      inv?.customer_id
+        ? supabase
+            .from("customers")
+            .select("id,company,name,email,phone,address,website")
+            .eq("id", inv.customer_id)
+            .maybeSingle()
+        : Promise.resolve({ data: null }),
+      loadPriceMaps(inv.tenant_id),
+      resolveLogoUrl(settingsFull),
+    ]);
+
+    const marginPct = inv?.items?.meta?.marginPct ?? 100;
+    const charges   = recomputeChargesFromItems(inv?.items, maps, marginPct);
+    const disc      = extractDiscountModel(inv);
+    const { tax, grand } = computeBill(charges.preTax, disc, settingsFull?.tax_rate);
+
+    const html = buildInvoiceHtml({
+      inv,
+      charges,
+      disc,
+      tax,
+      grand,
+      settings: settingsFull,
+      customer: customer || {},
+      logoUrl
+    });
+
+    // Render in a detached container for capture
+    const container = document.createElement("div");
+    container.style.position = "fixed";
+    container.style.left = "-9999px";
+    container.style.top = "-9999px";
+    container.style.width = "800px";
+    container.innerHTML = html;
+    document.body.appendChild(container);
+
+    try {
+      const { path } = await captureElementToPdf({
+        element: container,
+        tenantId: inv.tenant_id,
+        kind: "invoices",
+        code: inv.code
+      });
+      await supabase.from("invoices")
+        .update({ pdf_path: path })
+        .eq("id", inv.id)
+        .eq("tenant_id", inv.tenant_id);
+
+      const { data, error } = await supabase.storage
+        .from("pdfs")
+        .createSignedUrl(path, 60 * 60);
+      if (!error && data?.signedUrl) {
+        return { path, signedUrl: data.signedUrl };
+      }
+      return { path };
+    } finally {
+      document.body.removeChild(container);
+    }
+  }
+
   const openEmail = async (r) => {
     setEmailDefault("");
     try{
@@ -268,100 +457,51 @@ export default function Invoices(){
         def = data?.email || "";
       }
       setEmailDefault(def);
-    }catch(e){
-      // ignore; keep empty fallback
-    }
+    }catch(_){}
     setEmailFor(r);
   };
 
-// Sends the invoice email using the saved (or default) template.
-// Expects: tenantId in scope, supabase import, and a Confirm modal that passes `to`.
-// Call with: await emailInvoice(inv, to)
-async function emailInvoice(inv, to) {
-  try {
-    // 1) Load customer (so we can prefill and render name)
-    const { data: customer } = await supabase
-      .from("customers")
-      .select("id,name,company,email")
-      .eq("id", inv.customer_id)
-      .maybeSingle();
+  async function emailInvoice(inv, toOverride) {
+    try {
+      const tenantId = inv.tenant_id;
+      const [settingsFull, custRes] = await Promise.all([
+        fetchSettingsOrThrow(tenantId),
+        supabase.from("customers").select("id,name,email").eq("id", inv.customer_id).maybeSingle()
+      ]);
+      const customer = custRes.data || null;
 
-    // 2) Load settings — includes business info + optional custom template
-    const { data: settings, error: setErr } = await supabase
-      .from("settings")
-      .select(`
-        business_name,business_email,
-        brand_logo_url,brand_logo_path,
-        email_invoice_subject,email_invoice_template_html
-      `)
-      .eq("tenant_id", tenantId)
-      .maybeSingle();
-    if (setErr) throw setErr;
+      // Ensure we have the *same* pretty PDF attached
+      const pdfInfo = await ensureInvoicePdf(inv, settingsFull);
 
-    // 3) Attach PDF if present
-    let pdfUrl = "";
-    if (inv.pdf_path) {
-      const { data: signed } = await supabase
-        .storage
-        .from("pdfs")
-        .createSignedUrl(inv.pdf_path, 60 * 60);
-      if (signed?.signedUrl) pdfUrl = signed.signedUrl;
+      // Build subject/body using template engine (unchanged)
+      const ctx = buildInvoiceContext({
+        invoice: inv,
+        customer,
+        settings: settingsFull,
+        pdfUrl: pdfInfo?.signedUrl || "",
+      });
+      const { subject: subjDefault, html: htmlDefault } = invoiceDefaults();
+      const subjectTpl = settingsFull?.email_invoice_subject || subjDefault;
+      const htmlTpl    = settingsFull?.email_invoice_template_html || htmlDefault;
+      const subject = renderTemplate(subjectTpl, ctx);
+      const html    = renderTemplate(htmlTpl, ctx);
+
+      const to = (toOverride || customer?.email || "").trim();
+      if (!to) throw new Error("Customer email not found. You can override it in the dialog.");
+
+      const attachments = pdfInfo?.signedUrl
+        ? [{ filename: `${inv.code}.pdf`, url: pdfInfo.signedUrl }]
+        : [];
+
+      await sendEmailDoc({ to, subject, html, attachments });
+      alert("Invoice email sent.");
+      setEmailFor(null);
+    } catch (err) {
+      console.error(err);
+      alert(err.message || "Failed to send invoice email");
     }
-
-    // 4) Money context from invoice.totals (fall back to 0’s safely)
-    const t = inv?.totals || {};
-    const money = {
-      subtotal: Number(t.totalChargePreTax ?? t.subtotal ?? 0),
-      tax:      Number(t.tax ?? 0),
-      discount: Number(
-        // support either totals.discount or existing discount_amount fields you store
-        t.discount ?? inv.discount_amount ?? 0
-      ),
-      deposit:  Number(
-        t.deposit ?? inv.deposit_amount ?? 0
-      ),
-      grand:    Number(
-        t.grand ??
-        // fallback: subtotal + tax - discount - deposit
-        (Number(t.totalChargePreTax ?? t.subtotal ?? 0)
-         + Number(t.tax ?? 0)
-         - Number(t.discount ?? inv.discount_amount ?? 0)
-         - Number(t.deposit ?? inv.deposit_amount ?? 0))
-      ),
-    };
-
-    // 5) Pick template strings (custom or defaults)
-    const dft     = invoiceDefaults();                 // { subject, html }
-    const subjTpl = settings?.email_invoice_subject    || dft.subject;
-    const htmlTpl = settings?.email_invoice_template_html || dft.html;
-
-    // 6) Build rendering context and render both subject and html
-    const ctx = buildInvoiceContext({
-      invoice: inv,
-      customer,
-      settings,
-      money,
-      pdfUrl,
-    });
-    const subject = renderTemplate(subjTpl, ctx);
-    const html    = renderTemplate(htmlTpl, ctx);
-
-    // 7) Optional attachment (links are already in the html as well)
-    const attachments = pdfUrl ? [{ filename: `${inv.code}.pdf`, url: pdfUrl }] : undefined;
-
-    // 8) Fire!
-    await sendEmailDoc({ to, subject, html, attachments });
-    alert("Email sent.");
-    // If you keep a modal state like setEmailFor(null), do it here
-  } catch (err) {
-    console.error("Email error:", err);
-    alert(err.message || "Failed to send email");
   }
-}
 
-
-  // ==================== TABLE CALCULATIONS ====================
-  
   const rowCalc = (r) => {
     const t = r?.totals||{};
     const recomputedPre = num(t.totalChargePreTax,
@@ -372,8 +512,6 @@ async function emailInvoice(inv, to) {
     return {pre: recomputedPre, discountAmt, tax, grand};
   };
 
-  // ==================== RENDER ====================
-  
   return (
     <section className="section">
       <div className="section-header"><h2>Invoices</h2></div>
@@ -391,19 +529,17 @@ async function emailInvoice(inv, to) {
         </div>
       ):null}
 
-      {/* INVOICE VIEW MODAL */}
       {viewRow? (
         <InvoiceViewModal
           viewRow={viewRow}
           viewCustomer={viewCustomer}
-          settings={settings}
+          settings={viewSettings || settings}
           onClose={() => setViewRow(null)}
           onGeneratePdf={() => generatePdf(viewRow)}
           onOpenEmail={() => openEmail(viewRow)}
         />
       ):null}
 
-      {/* INVOICES TABLE */}
       <div className="table-wrap" style={{marginTop:16}}>
         <table className="table">
           <thead>
@@ -442,9 +578,6 @@ async function emailInvoice(inv, to) {
         </table>
       </div>
 
-      {/* MODALS */}
-      
-      {/* Email modal */}
       <Confirm
         open={!!emailFor}
         title={`Email ${emailFor?.code || ""}`}
@@ -468,7 +601,6 @@ async function emailInvoice(inv, to) {
         onNo={()=>{ setEmailFor(null); setEmailDefault(""); }}
       />
 
-      {/* PDF preview modal */}
       {pdfOpen ? (
         <div className="modal" onClick={()=>setPdfOpen(false)}>
           <div className="modal-content wide" onClick={(e)=>e.stopPropagation()}>
@@ -484,16 +616,12 @@ async function emailInvoice(inv, to) {
         </div>
       ):null}
 
-      {/* Hidden print element */}
       <div ref={printRef} style={{position:"fixed", left:-9999, top:-9999}}/>
     </section>
   );
 }
 
-/* ========================================================================== */
-/*                             INVOICE VIEW MODAL                            */
-/* ========================================================================== */
-
+// ---------- view modal & sections ----------
 function InvoiceViewModal({viewRow, viewCustomer, settings, onClose, onGeneratePdf, onOpenEmail}) {
   const t = viewRow?.totals || {};
   const disc = extractDiscountModel(viewRow);
@@ -502,32 +630,30 @@ function InvoiceViewModal({viewRow, viewCustomer, settings, onClose, onGenerateP
   return (
     <div className="modal" onClick={onClose}>
       <div className="modal-content wide" onClick={(e)=>e.stopPropagation()}>
-        
-        {/* MODAL HEADER */}
         <InvoiceModalHeader 
           invoiceCode={viewRow.code}
           onGeneratePdf={onGeneratePdf}
           onOpenEmail={onOpenEmail}
           onClose={onClose}
         />
-        
-        {/* INVOICE INFO HEADER */}
-        <InvoiceInfoHeader 
-          createdAt={viewRow.created_at}
-          title={viewRow.title}
-        />
+        <InvoiceInfoHeader createdAt={viewRow.created_at} title={viewRow.title} />
 
-        {/* MODAL CONTENT */}
-        <div className="modal-body" style={{maxHeight:'60vh', overflowY:'auto', padding:'8px 0'}}>
-          
-          {/* CUSTOMER SECTION */}
-          {viewCustomer && (
-            <InvoiceDetailSection title="Customer Information" icon="👤">
-              <CustomerInfo customer={viewCustomer} />
+        <div className="row" style={{gap:16, marginBottom:16}}>
+          {viewCustomer ? (
+            <div style={{flex:1}}>
+              <InvoiceDetailSection title="Bill To" icon="👤">
+                <CustomerInfo customer={viewCustomer} />
+              </InvoiceDetailSection>
+            </div>
+          ) : null}
+          <div style={{flex:1}}>
+            <InvoiceDetailSection title="From" icon="🏢">
+              <BusinessInfo settings={settings}/>
             </InvoiceDetailSection>
-          )}
+          </div>
+        </div>
 
-          {/* CHARGES BREAKDOWN SECTION */}
+        <div className="modal-body" style={{maxHeight:'60vh', overflowY:'auto', padding:'8px 0'}}>
           <InvoiceDetailSection title="Charges Breakdown" icon="💰">
             <ChargesBreakdown 
               totals={t}
@@ -538,28 +664,18 @@ function InvoiceViewModal({viewRow, viewCustomer, settings, onClose, onGenerateP
               grand={grand}
             />
           </InvoiceDetailSection>
-
         </div>
-        
       </div>
     </div>
   );
 }
 
-/* ========================================================================== */
-/*                         INVOICE MODAL SUB-COMPONENTS                      */
-/* ========================================================================== */
-
 function InvoiceModalHeader({invoiceCode, onGeneratePdf, onOpenEmail, onClose}) {
   return (
     <div className="row" style={{borderBottom: '1px solid #eee', paddingBottom: '12px', marginBottom: '16px'}}>
       <div>
-        <h3 style={{margin:0, fontSize:'24px', fontWeight:'600'}}>
-          Invoice Details
-        </h3>
-        <div className="tiny mono" style={{color:'#666', marginTop:'4px'}}>
-          #{invoiceCode}
-        </div>
+        <h3 style={{margin:0, fontSize:'24px', fontWeight:'600'}}>Invoice Details</h3>
+        <div className="tiny mono" style={{color:'#666', marginTop:'4px'}}>#{invoiceCode}</div>
       </div>
       <div className="btn-row">
         <button className="btn" onClick={onGeneratePdf} title="Generate PDF">
@@ -579,17 +695,12 @@ function InvoiceModalHeader({invoiceCode, onGeneratePdf, onOpenEmail, onClose}) 
 function InvoiceInfoHeader({createdAt, title}) {
   return (
     <div className="invoice-info-header" style={{
-      background: '#f8f9fa', 
-      padding: '12px 16px', 
-      borderRadius: '8px', 
-      marginBottom: '20px',
-      border: '1px solid #e9ecef'
+      background: '#f8f9fa', padding: '12px 16px', borderRadius: '8px',
+      marginBottom: '20px', border: '1px solid #e9ecef'
     }}>
       <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'8px'}}>
         <h4 style={{margin:0, fontSize:'18px', color:'#333'}}>{title || 'Invoice'}</h4>
-        <span className="badge" style={{background:'#28a745', color:'white'}}>
-          Active
-        </span>
+        <span className="badge" style={{background:'#28a745', color:'white'}}>Active</span>
       </div>
       <div style={{fontSize:'14px', color:'#666'}}>
         <i className="fa-regular fa-calendar"/> Created: {new Date(createdAt).toLocaleString()}
@@ -601,66 +712,69 @@ function InvoiceInfoHeader({createdAt, title}) {
 function InvoiceDetailSection({title, icon, children}) {
   return (
     <div className="detail-section" style={{marginBottom:'16px'}}>
-      <div style={{
-        display:'flex', 
-        alignItems:'center', 
-        gap:'8px', 
-        marginBottom:'8px',
-        paddingBottom:'6px',
-        borderBottom:'2px solid #f0f0f0'
-      }}>
+      <div style={{display:'flex', alignItems:'center', gap:'8px', marginBottom:'8px', paddingBottom:'6px', borderBottom:'2px solid #f0f0f0'}}>
         <span style={{fontSize:'18px'}}>{icon}</span>
         <h4 style={{margin:0, fontSize:'16px', fontWeight:'600', color:'#333'}}>{title}</h4>
       </div>
-      <div style={{paddingLeft:'18px'}}>
-        {children}
-      </div>
+      <div style={{paddingLeft:'18px'}}>{children}</div>
     </div>
   );
 }
 
 function CustomerInfo({customer}) {
   return (
-    <div style={{
-      padding:'12px', 
-      background:'#f8f9fa', 
-      borderRadius:'8px',
-      border:'1px solid #e9ecef'
-    }}>
+    <div style={{padding:'12px', background:'#f8f9fa', borderRadius:'8px', border:'1px solid #e9ecef'}}>
       <div style={{marginBottom:'8px', fontSize:'16px', fontWeight:'600', color:'#333'}}>
         {customer.company || customer.name}
       </div>
       {customer.email && (
         <div style={{marginBottom:'4px', fontSize:'14px', color:'#666'}}>
-          <i className="fa-regular fa-envelope" style={{marginRight:'8px'}}/>
-          {customer.email}
+          <i className="fa-regular fa-envelope" style={{marginRight:'8px'}}/>{customer.email}
         </div>
       )}
       {customer.phone && (
         <div style={{marginBottom:'4px', fontSize:'14px', color:'#666'}}>
-          <i className="fa-solid fa-phone" style={{marginRight:'8px'}}/>
-          {customer.phone}
+          <i className="fa-solid fa-phone" style={{marginRight:'8px'}}/>{customer.phone}
         </div>
       )}
       {customer.address && (
         <div style={{fontSize:'14px', color:'#666'}}>
-          <i className="fa-solid fa-location-dot" style={{marginRight:'8px'}}/>
-          {customer.address}
+          <i className="fa-solid fa-location-dot" style={{marginRight:'8px'}}/>{customer.address}
         </div>
       )}
     </div>
   );
 }
 
+function BusinessInfo({settings}) {
+  const s = settings || {};
+  return (
+    <div style={{padding:'12px', background:'#f8f9fa', borderRadius:'8px', border:'1px solid #e9ecef'}}>
+      <div style={{marginBottom:'8px', fontSize:'16px', fontWeight:'600', color:'#333'}}>
+        {s.business_name || '—'}
+      </div>
+      {s.business_email ? (
+        <div style={{marginBottom:'4px', fontSize:'14px', color:'#666'}}>
+          <i className="fa-regular fa-envelope" style={{marginRight:'8px'}}/>{s.business_email}
+        </div>
+      ) : null}
+      {s.business_phone ? (
+        <div style={{marginBottom:'4px', fontSize:'14px', color:'#666'}}>
+          <i className="fa-solid fa-phone" style={{marginRight:'8px'}}/>{s.business_phone}
+        </div>
+      ) : null}
+      {s.business_address ? (
+        <div style={{fontSize:'14px', color:'#666'}}>
+          <i className="fa-solid fa-location-dot" style={{marginRight:'8px'}}/>{s.business_address}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ChargesBreakdown({totals, discount, discountAmt, tax, taxRate, grand}) {
   return (
-    <div style={{
-      padding:'16px', 
-      background:'#f8f9fa', 
-      borderRadius:'8px',
-      border:'1px solid #e9ecef'
-    }}>
-      {/* Line Items */}
+    <div style={{padding:'16px', background:'#f8f9fa', borderRadius:'8px', border:'1px solid #e9ecef'}}>
       <div style={{marginBottom:'16px'}}>
         <ChargeLineItem label="Equipment" amount={num(totals.equipmentCharge)} />
         <ChargeLineItem label="Materials" amount={num(totals.materialsCharge)} />
@@ -670,31 +784,15 @@ function ChargesBreakdown({totals, discount, discountAmt, tax, taxRate, grand}) 
           <ChargeLineItem label="UV/Sublimation Ink" amount={num(totals.inkCharge)} />
         )}
       </div>
-
-      {/* Subtotal */}
-      <div style={{
-        borderTop:'1px solid #dee2e6', 
-        paddingTop:'12px', 
-        marginBottom:'12px'
-      }}>
+      <div style={{borderTop:'1px solid #dee2e6', paddingTop:'12px', marginBottom:'12px'}}>
         <ChargeLineItem label="Subtotal" amount={num(totals.totalChargePreTax)} bold />
       </div>
-
-      {/* Adjustments */}
       <div style={{marginBottom:'12px'}}>
         <ChargeLineItem label="Discount" amount={-num(discountAmt)} color="#dc3545" />
         <ChargeLineItem label={`Tax (${num(taxRate).toFixed(2)}%)`} amount={num(tax)} />
         <ChargeLineItem label="Deposit" amount={-num(discount.deposit)} color="#dc3545" />
       </div>
-
-      {/* Total */}
-      <div style={{
-        borderTop:'2px solid #dee2e6', 
-        paddingTop:'12px',
-        background:'white',
-        borderRadius:'6px',
-        padding:'12px'
-      }}>
+      <div style={{borderTop:'2px solid #dee2e6', paddingTop:'12px', background:'white', borderRadius:'6px', padding:'12px'}}>
         <ChargeLineItem label="Total" amount={num(grand)} bold large />
       </div>
     </div>
@@ -704,26 +802,12 @@ function ChargesBreakdown({totals, discount, discountAmt, tax, taxRate, grand}) 
 function ChargeLineItem({label, amount, bold = false, large = false, color = null}) {
   const isNegative = amount < 0;
   const displayAmount = Math.abs(amount);
-  
   return (
-    <div style={{
-      display:'flex', 
-      justifyContent:'space-between', 
-      alignItems:'center',
-      marginBottom:'6px',
-      fontSize: large ? '18px' : '14px'
-    }}>
-      <span style={{
-        fontWeight: bold ? '600' : '400',
-        color: color || '#333'
-      }}>
+    <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'6px', fontSize: large ? '18px' : '14px'}}>
+      <span style={{fontWeight: bold ? '600' : '400', color: color || '#333'}}>
         {label}
       </span>
-      <span style={{
-        fontWeight: bold ? '700' : '500',
-        color: color || (isNegative ? '#dc3545' : '#333'),
-        fontSize: large ? '20px' : '14px'
-      }}>
+      <span style={{fontWeight: bold ? '700' : '500', color: color || (isNegative ? '#dc3545' : '#333'), fontSize: large ? '20px' : '14px'}}>
         {isNegative ? '−' : ''}${displayAmount.toFixed(2)}
       </span>
     </div>
